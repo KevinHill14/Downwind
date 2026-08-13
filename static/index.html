@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Fire Tracker</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
+  #globeViz { width: 100vw; height: 100vh; }
+  #status {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    background: rgba(20,20,20,0.85); color: #eee; padding: 10px 16px;
+    border-radius: 8px; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div id="status">Loading fire data...</div>
+<div id="globeViz"></div>
+
+<script src="https://unpkg.com/globe.gl"></script>
+<script>
+const statusEl = document.getElementById('status');
+
+const world = Globe()
+  (document.getElementById('globeViz'))
+  .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg')
+  .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
+  .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
+  .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
+  .pointAltitude(0.02)
+  .pointRadius(d => Math.max(0.2, Math.min(1, Math.log1p(d.frp) / 8)))
+  .pointColor(() => '#ff5522')
+  .pointLabel(d => `FRP: ${d.frp} MW<br/>Confidence: ${d.confidence}<br/>${d.acq_date} ${d.acq_time}`);
+
+async function loadFires() {
+  try {
+    const res = await fetch('/api/fires');
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
+    world.pointsData(json.fires);
+    statusEl.textContent = `${json.fires.length} active fire detections`;
+  } catch (err) {
+    statusEl.textContent = 'Error loading fires: ' + err.message;
+    console.error(err);
+  }
+}
+
+loadFires();
+</script>
+</body>
+</html>
