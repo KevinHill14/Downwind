@@ -40,6 +40,19 @@
     padding: 7px 12px; text-align: left; font-size: 13px; cursor: pointer;
   }
   #continentPanel button:hover { background: #e25822; }
+
+  #continentPanel hr { width: 100%; border: none; border-top: 1px solid #444; margin: 4px 0; }
+  #countrySearch {
+    background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px;
+    padding: 7px 10px; font-size: 13px; outline: none;
+  }
+  #countrySearch:focus { border-color: #e25822; }
+  #countryResults { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+  #countryResults button {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 6px 12px; text-align: left; font-size: 13px; cursor: pointer;
+  }
+  #countryResults button:hover { background: #e25822; }
 </style>
 </head>
 <body>
@@ -60,10 +73,14 @@
   <button data-lat="54" data-lng="15" data-alt="1.8">Europe</button>
   <button data-lat="45" data-lng="-100" data-alt="1.8">North America</button>
   <button data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
+  <hr />
+  <input type="text" id="countrySearch" placeholder="Search country..." autocomplete="off" />
+  <div id="countryResults"></div>
 </div>
 <div id="globeViz"></div>
 
 <script src="https://unpkg.com/globe.gl"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
 <script>
 const statusEl = document.getElementById('status');
 const optimizeToggle = document.getElementById('optimizeToggle');
@@ -152,7 +169,96 @@ const world = Globe()
   .pointAltitude(0.02)
   .pointRadius(d => Math.max(0.2, Math.min(1, Math.log1p(d.frp) / 8)))
   .pointColor(() => '#ff5522')
-  .pointLabel(d => `FRP: ${d.frp} MW<br/>Confidence: ${d.confidence}<br/>${d.acq_date} ${d.acq_time}`);
+  .pointLabel(d => `FRP: ${d.frp} MW<br/>Confidence: ${d.confidence}<br/>${d.acq_date} ${d.acq_time}`)
+  .polygonCapColor(() => 'rgba(0,0,0,0)')
+  .polygonSideColor(() => 'rgba(0,0,0,0)')
+  .polygonStrokeColor(() => '#000000')
+  .polygonAltitude(0.005)
+  .polygonLabel(d => d.properties?.name ?? '');
+
+// Approximate polygon area (shoelace formula on raw lon/lat) - only used to
+// rank ring sizes, not for precise measurement.
+function ringArea(ring) {
+  let area = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[(i + 1) % ring.length];
+    area += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(area / 2);
+}
+
+// Bounding-box center/extent of a country's MAIN landmass, used to fly the
+// camera to it. Countries with far-flung territories (e.g. France with
+// French Guiana, the Netherlands, the UK) are MultiPolygons - averaging
+// across every part would land the camera in open ocean between them, so
+// we only use the largest polygon by area.
+function boundsOf(feature) {
+  const geom = feature.geometry;
+  const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+
+  let mainPolygon = polygons[0];
+  let bestArea = ringArea(polygons[0][0]);
+  for (let i = 1; i < polygons.length; i++) {
+    const a = ringArea(polygons[i][0]);
+    if (a > bestArea) { bestArea = a; mainPolygon = polygons[i]; }
+  }
+
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+  mainPolygon[0].forEach(([lng, lat]) => {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  });
+  return {
+    lat: (minLat + maxLat) / 2,
+    lng: (minLng + maxLng) / 2,
+    latSpan: maxLat - minLat,
+    lngSpan: maxLng - minLng,
+  };
+}
+
+let COUNTRY_LIST = [];
+const countrySearch = document.getElementById('countrySearch');
+const countryResults = document.getElementById('countryResults');
+
+async function loadCountryBorders() {
+  const topo = await (await fetch('https://unpkg.com/world-atlas@2/countries-110m.json')).json();
+  const countries = topojson.feature(topo, topo.objects.countries).features
+    .filter(f => f.properties?.name && f.properties.name !== 'Antarctica');
+  world.polygonsData(countries);
+
+  COUNTRY_LIST = countries.map(f => {
+    const b = boundsOf(f);
+    return {
+      name: f.properties.name,
+      lat: b.lat,
+      lng: b.lng,
+      altitude: clamp(Math.max(b.latSpan, b.lngSpan) / 60, 0.25, 2.2),
+    };
+  });
+}
+loadCountryBorders();
+
+function renderCountryResults(query) {
+  countryResults.innerHTML = '';
+  if (!query) return;
+  const q = query.toLowerCase();
+  COUNTRY_LIST
+    .filter(c => c.name.toLowerCase().startsWith(q))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach(c => {
+      const btn = document.createElement('button');
+      btn.textContent = c.name;
+      btn.addEventListener('click', () => {
+        world.pointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
+      });
+      countryResults.appendChild(btn);
+    });
+}
+
+countrySearch.addEventListener('input', () => renderCountryResults(countrySearch.value.trim()));
 
 function applyRealisticMode() {
   world
