@@ -11,26 +11,184 @@
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 16px;
     border-radius: 8px; font-size: 13px;
   }
+  #optimizePanel {
+    position: absolute; top: 16px; right: 16px; z-index: 10;
+    background: rgba(20,20,20,0.85); color: #eee; padding: 10px 14px;
+    border-radius: 8px; font-size: 13px; display: flex; align-items: center; gap: 10px;
+  }
+  .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background-color: #555; transition: 0.2s; border-radius: 22px;
+  }
+  .slider::before {
+    content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
+    background-color: #fff; transition: 0.2s; border-radius: 50%;
+  }
+  input:checked + .slider { background-color: #2ecc71; }
+  input:checked + .slider::before { transform: translateX(18px); }
+
+  #continentPanel {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 10;
+    background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
+    border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
+  }
+  #continentPanel h2 { font-size: 11px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
+  #continentPanel button {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 7px 12px; text-align: left; font-size: 13px; cursor: pointer;
+  }
+  #continentPanel button:hover { background: #e25822; }
 </style>
 </head>
 <body>
 <div id="status">Loading fire data...</div>
+<div id="optimizePanel">
+  <span>Optimize</span>
+  <label class="switch">
+    <input type="checkbox" id="optimizeToggle" />
+    <span class="slider"></span>
+  </label>
+</div>
+<div id="continentPanel">
+  <h2>Quick Look</h2>
+  <button data-lat="1" data-lng="21" data-alt="1.8">Africa</button>
+  <button data-lat="-82" data-lng="0" data-alt="1.8">Antarctica</button>
+  <button data-lat="34" data-lng="100" data-alt="1.8">Asia</button>
+  <button data-lat="-25" data-lng="133" data-alt="1.8">Australia</button>
+  <button data-lat="54" data-lng="15" data-alt="1.8">Europe</button>
+  <button data-lat="45" data-lng="-100" data-alt="1.8">North America</button>
+  <button data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
+</div>
 <div id="globeViz"></div>
 
 <script src="https://unpkg.com/globe.gl"></script>
 <script>
 const statusEl = document.getElementById('status');
+const optimizeToggle = document.getElementById('optimizeToggle');
+
+// Builds a single lightweight flat-color texture for "Optimize" mode:
+// land is shaded green (darker toward higher elevation/mountains), ocean is blue.
+// Uses a real land/ocean mask + elevation heightmap, downsampled once and
+// recolored on a canvas, so at render time it's just one small static texture
+// with no bump displacement, atmosphere, or starfield background.
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+async function buildSimpleTexture() {
+  const W = 512, H = 256;
+
+  const [waterImg, elevImg] = await Promise.all([
+    loadImage('https://unpkg.com/three-globe/example/img/earth-water.png'),
+    loadImage('https://unpkg.com/three-globe/example/img/earth-topology.png'),
+  ]);
+
+  const wCanvas = document.createElement('canvas');
+  wCanvas.width = W; wCanvas.height = H;
+  const wCtx = wCanvas.getContext('2d');
+  wCtx.drawImage(waterImg, 0, 0, W, H);
+  const waterData = wCtx.getImageData(0, 0, W, H).data;
+
+  const eCanvas = document.createElement('canvas');
+  eCanvas.width = W; eCanvas.height = H;
+  const eCtx = eCanvas.getContext('2d');
+  eCtx.drawImage(elevImg, 0, 0, W, H);
+  const elevData = eCtx.getImageData(0, 0, W, H).data;
+
+  // Normalize elevation using only land pixels (ocean elevation values are
+  // clamped near 0 and would otherwise skew the range).
+  const landElevs = [];
+  for (let i = 0; i < W * H; i++) {
+    if (waterData[i * 4] < 180) landElevs.push(elevData[i * 4]);
+  }
+  landElevs.sort((a, b) => a - b);
+  const lo = landElevs[Math.floor(landElevs.length * 0.05)] || 0;
+  const hi = landElevs[Math.floor(landElevs.length * 0.95)] || 255;
+
+  const out = wCtx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) {
+    const idx = i * 4;
+    const isOcean = waterData[idx] >= 180;
+    if (isOcean) {
+      // gentle vertical gradient: brighter blue near the equator, darker toward poles
+      const y = Math.floor(i / W);
+      const t = Math.abs(y - H / 2) / (H / 2);
+      out.data[idx] = lerp(20, 8, t);
+      out.data[idx + 1] = lerp(90, 45, t);
+      out.data[idx + 2] = lerp(160, 95, t);
+    } else {
+      const t = clamp((elevData[idx] - lo) / ((hi - lo) || 1), 0, 1);
+      // low elevation -> bright lowland green, high elevation -> dark mountain green
+      out.data[idx] = lerp(55, 95, t);
+      out.data[idx + 1] = lerp(145, 75, t);
+      out.data[idx + 2] = lerp(60, 55, t);
+    }
+    out.data[idx + 3] = 255;
+  }
+  wCtx.putImageData(out, 0, 0);
+  return wCanvas.toDataURL();
+}
+
+let simpleTexturePromise = null;
+function getSimpleTexture() {
+  if (!simpleTexturePromise) simpleTexturePromise = buildSimpleTexture();
+  return simpleTexturePromise;
+}
 
 const world = Globe()
   (document.getElementById('globeViz'))
-  .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg')
-  .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
-  .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
   .pointAltitude(0.02)
   .pointRadius(d => Math.max(0.2, Math.min(1, Math.log1p(d.frp) / 8)))
   .pointColor(() => '#ff5522')
   .pointLabel(d => `FRP: ${d.frp} MW<br/>Confidence: ${d.confidence}<br/>${d.acq_date} ${d.acq_time}`);
+
+function applyRealisticMode() {
+  world
+    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg')
+    .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
+    .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
+    .showAtmosphere(true);
+}
+
+async function applySimpleMode() {
+  world
+    .bumpImageUrl(null)
+    .backgroundImageUrl(null)
+    .showAtmosphere(false);
+  const texture = await getSimpleTexture();
+  world.globeImageUrl(texture);
+}
+
+applyRealisticMode();
+
+optimizeToggle.addEventListener('change', () => {
+  if (optimizeToggle.checked) {
+    applySimpleMode();
+  } else {
+    applyRealisticMode();
+  }
+});
+
+document.querySelectorAll('#continentPanel button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    world.pointOfView(
+      { lat: parseFloat(btn.dataset.lat), lng: parseFloat(btn.dataset.lng), altitude: parseFloat(btn.dataset.alt) },
+      1000
+    );
+  });
+});
 
 async function loadFires() {
   try {
