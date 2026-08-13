@@ -14,8 +14,9 @@
   #optimizePanel {
     position: absolute; top: 16px; right: 16px; z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 14px;
-    border-radius: 8px; font-size: 13px; display: flex; align-items: center; gap: 10px;
+    border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;
   }
+  #optimizePanel .switchRow { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
   .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider {
@@ -53,16 +54,45 @@
     padding: 6px 12px; text-align: left; font-size: 13px; cursor: pointer;
   }
   #countryResults button:hover { background: #e25822; }
+
+  #predictionPanel {
+    position: absolute; bottom: 16px; left: 16px; z-index: 10;
+    background: rgba(20,20,20,0.9); color: #eee; padding: 12px 16px;
+    border-radius: 8px; font-size: 13px; max-width: 320px; display: none;
+  }
+  #predictionPanel h3 { margin: 0 0 6px; font-size: 13px; color: #ff8a3d; }
+  #predictionPanel p { margin: 3px 0; color: #ccc; }
+  #predictionPanel button {
+    margin-top: 8px; background: #2a2a2a; color: #eee; border: none;
+    border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+  }
+  #predictionPanel button:hover { background: #555; }
 </style>
 </head>
 <body>
 <div id="status">Loading fire data...</div>
 <div id="optimizePanel">
-  <span>Optimize</span>
-  <label class="switch">
-    <input type="checkbox" id="optimizeToggle" />
-    <span class="slider"></span>
-  </label>
+  <div class="switchRow">
+    <span>Optimize</span>
+    <label class="switch">
+      <input type="checkbox" id="optimizeToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="switchRow">
+    <span>Prediction</span>
+    <label class="switch">
+      <input type="checkbox" id="predictionToggle" checked />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="switchRow">
+    <span>Show all fires</span>
+    <label class="switch">
+      <input type="checkbox" id="showAllToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
 </div>
 <div id="continentPanel">
   <h2>Quick Look</h2>
@@ -76,6 +106,11 @@
   <hr />
   <input type="text" id="countrySearch" placeholder="Search country..." autocomplete="off" />
   <div id="countryResults"></div>
+</div>
+<div id="predictionPanel">
+  <h3>Fire spread predictions</h3>
+  <div id="predictionInfo"></div>
+  <button id="clearPredictions">Clear</button>
 </div>
 <div id="globeViz"></div>
 
@@ -174,7 +209,12 @@ const world = Globe()
   .polygonSideColor(() => 'rgba(0,0,0,0)')
   .polygonStrokeColor(() => '#000000')
   .polygonAltitude(0.005)
-  .polygonLabel(d => d.properties?.name ?? '');
+  .polygonLabel(d => d.properties?.name ?? '')
+  .pathPoints(p => p)
+  .pathPointLat(p => p.lat)
+  .pathPointLng(p => p.lng)
+  .pathColor(() => 'rgba(255,140,0,0.9)')
+  .pathStroke(2);
 
 // Approximate polygon area (shoelace formula on raw lon/lat) - only used to
 // rank ring sizes, not for precise measurement.
@@ -216,6 +256,7 @@ function boundsOf(feature) {
     lng: (minLng + maxLng) / 2,
     latSpan: maxLat - minLat,
     lngSpan: maxLng - minLng,
+    minLat, maxLat, minLng, maxLng,
   };
 }
 
@@ -231,11 +272,17 @@ async function loadCountryBorders() {
 
   COUNTRY_LIST = countries.map(f => {
     const b = boundsOf(f);
+    // pad the bbox a bit so fires just across a border/coastline aren't missed
+    const pad = 0.75;
     return {
       name: f.properties.name,
       lat: b.lat,
       lng: b.lng,
       altitude: clamp(Math.max(b.latSpan, b.lngSpan) / 60, 0.25, 2.2),
+      minLat: clamp(b.minLat - pad, -90, 90),
+      maxLat: clamp(b.maxLat + pad, -90, 90),
+      minLng: clamp(b.minLng - pad, -180, 180),
+      maxLng: clamp(b.maxLng + pad, -180, 180),
     };
   });
 }
@@ -251,14 +298,102 @@ function renderCountryResults(query) {
     .forEach(c => {
       const btn = document.createElement('button');
       btn.textContent = c.name;
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         world.pointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
+        const fires = await loadCountryFires(c);
+        if (predictionToggle.checked) {
+          runCountryPredictions(c, fires);
+        }
       });
       countryResults.appendChild(btn);
     });
 }
 
 countrySearch.addEventListener('input', () => renderCountryResults(countrySearch.value.trim()));
+
+// --- Fire spread predictions (gated by the Prediction toggle, run on country search) ---
+const predictionToggle = document.getElementById('predictionToggle');
+const predictionPanel = document.getElementById('predictionPanel');
+const predictionInfo = document.getElementById('predictionInfo');
+const clearPredictionsBtn = document.getElementById('clearPredictions');
+const MAX_PREDICTIONS_PER_COUNTRY = 15; // cap concurrent API calls
+
+let ALL_FIRES = [];
+
+// Fetches the accurate, full fire set for a country's bbox (the initial world
+// view only holds the top ~500 most intense fires globally, so smaller/less
+// intense fires in a given country may be missing from it) and merges it into
+// the displayed points.
+async function loadCountryFires(country) {
+  statusEl.textContent = `Loading fires for ${country.name}...`;
+  const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
+  try {
+    const res = await fetch('/api/fires?bbox=' + encodeURIComponent(bbox));
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
+
+    const seen = new Set(ALL_FIRES.map(f => `${f.lat},${f.lng},${f.acq_time}`));
+    json.fires.forEach(f => {
+      const key = `${f.lat},${f.lng},${f.acq_time}`;
+      if (!seen.has(key)) { seen.add(key); ALL_FIRES.push(f); }
+    });
+    world.pointsData(ALL_FIRES);
+    statusEl.textContent = `${json.fires.length} active fire detections in ${country.name} (${ALL_FIRES.length} shown total)`;
+    return json.fires;
+  } catch (err) {
+    statusEl.textContent = 'Error loading fires: ' + err.message;
+    return [];
+  }
+}
+
+async function runCountryPredictions(country, fires) {
+  world.pathsData([]);
+  predictionPanel.style.display = 'block';
+
+  if (fires.length === 0) {
+    predictionInfo.innerHTML = `<p>No active fires detected in ${country.name}.</p>`;
+    return;
+  }
+
+  const targets = fires
+    .slice()
+    .sort((a, b) => b.frp - a.frp)
+    .slice(0, MAX_PREDICTIONS_PER_COUNTRY);
+
+  predictionInfo.innerHTML = `<p>Predicting spread for ${targets.length} of ${fires.length} fire(s) in ${country.name}...</p>`;
+
+  const results = await Promise.allSettled(
+    targets.map(fire => {
+      const params = new URLSearchParams({ lat: fire.lat, lng: fire.lng, frp: fire.frp, hours: 6 });
+      return fetch('/api/predict?' + params.toString()).then(res => res.json());
+    })
+  );
+
+  const perimeters = results
+    .filter(r => r.status === 'fulfilled' && r.value.perimeter)
+    .map(r => {
+      const pts = r.value.perimeter;
+      return [...pts, pts[0]]; // close the ring
+    });
+
+  world.pathsData(perimeters);
+  predictionInfo.innerHTML = `
+    <p>${country.name}: ${fires.length} active fire(s) detected</p>
+    <p>Predicted 6hr spread for ${perimeters.length} of ${targets.length} fire(s) shown in orange</p>
+  `;
+}
+
+clearPredictionsBtn.addEventListener('click', () => {
+  world.pathsData([]);
+  predictionPanel.style.display = 'none';
+});
+
+predictionToggle.addEventListener('change', () => {
+  if (!predictionToggle.checked) {
+    world.pathsData([]);
+    predictionPanel.style.display = 'none';
+  }
+});
 
 function applyRealisticMode() {
   world
@@ -296,18 +431,29 @@ document.querySelectorAll('#continentPanel button').forEach(btn => {
   });
 });
 
+const INITIAL_WORLD_FIRE_LIMIT = 2500; // fast first paint; full per-country detail loads on search
+const showAllToggle = document.getElementById('showAllToggle');
+
 async function loadFires() {
+  const showAll = showAllToggle.checked;
+  statusEl.textContent = showAll ? 'Loading all fires worldwide...' : 'Loading fire data...';
   try {
-    const res = await fetch('/api/fires');
+    const url = showAll ? '/api/fires' : `/api/fires?limit=${INITIAL_WORLD_FIRE_LIMIT}`;
+    const res = await fetch(url);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
+    ALL_FIRES = json.fires;
     world.pointsData(json.fires);
-    statusEl.textContent = `${json.fires.length} active fire detections`;
+    statusEl.textContent = showAll
+      ? `${json.fires.length} active fire detections worldwide`
+      : `${json.fires.length} highest-intensity fire detections worldwide (search a country for full detail)`;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
   }
 }
+
+showAllToggle.addEventListener('change', loadFires);
 
 loadFires();
 </script>
