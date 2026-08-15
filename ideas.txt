@@ -1,0 +1,29 @@
+Ideas / deferred features (mentioned but not built yet)
+=========================================================
+
+- Country name labels
+  - White font by default
+  - Smart/zoom-dependent: only show a country's name once it actually fits
+    on screen at the current zoom (don't just always render every label -
+    that's what caused the earlier lag with the "!" markers, since each
+    label is a real 3D TextGeometry, not a cheap point sprite)
+
+- Ocean names (same label system as country names, once that's designed)
+
+- Compass showing orientation relative to the rest of the world
+
+- Street view button
+  - Lets the user jump to their own address / a specific location on the ground
+  - Explicitly flagged as a later job, not part of the current build
+
+- Dotted lines connecting a predicted fire's original and projected position
+  - Tried this and dropped it for now: dashed arcs weren't rendering
+    visibly, and with predictions running up to a week out, decided the
+    connecting line wasn't worth it anyway. Went with an arrowhead on the
+    original marker pointing toward the new one instead.
+  - Worth revisiting later if there's a reliable way to get a visible
+    dashed/dotted line on the globe.
+
+- Proper UI for fire info
+  - Right now fire/cluster/prediction details only show via hover tooltip.
+    Could use a real panel/card UI (click a marker to open details) instead.

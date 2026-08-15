@@ -30,19 +30,21 @@
   input:checked + .slider { background-color: #2ecc71; }
   input:checked + .slider::before { transform: translateX(18px); }
 
-  #fireCountRow { display: flex; flex-direction: column; gap: 6px; }
-  #fireCountRow .rowTop { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  #fireCountSlider {
+  .sliderRow { display: flex; flex-direction: column; gap: 6px; }
+  .sliderRow .rowTop { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .rangeSlider {
     -webkit-appearance: none; appearance: none; width: 140px; height: 4px;
     background: #555; border-radius: 2px; outline: none; margin: 0;
   }
-  #fireCountSlider::-webkit-slider-thumb {
+  .rangeSlider::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
     border-radius: 50%; background: #e25822; cursor: pointer;
   }
-  #fireCountSlider::-moz-range-thumb {
+  .rangeSlider::-moz-range-thumb {
     width: 14px; height: 14px; border: none; border-radius: 50%; background: #e25822; cursor: pointer;
   }
+  .rangeSlider:disabled { opacity: 0.4; cursor: not-allowed; }
+  .rangeSlider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
 
   #continentPanel {
     position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 10;
@@ -81,6 +83,15 @@
     border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
   }
   #predictionPanel button:hover { background: #555; }
+
+  #windToggleBtn {
+    position: absolute; bottom: 24px; right: 24px; z-index: 1000;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(20,20,20,0.85); color: #eee; border: 2px solid #444;
+    font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  #windToggleBtn:hover { border-color: #e25822; }
+  #windToggleBtn.active { background: #1a5276; border-color: #66ccff; }
 </style>
 </head>
 <body>
@@ -100,12 +111,19 @@
       <span class="slider"></span>
     </label>
   </div>
-  <div id="fireCountRow">
+  <div class="sliderRow">
+    <div class="rowTop">
+      <span>Prediction range</span>
+      <span id="predictionDaysLabel">1 day</span>
+    </div>
+    <input type="range" class="rangeSlider" id="predictionDaysSlider" min="1" max="7" step="1" value="1" />
+  </div>
+  <div class="sliderRow">
     <div class="rowTop">
       <span>Fires shown</span>
       <span id="fireCountLabel">2.5k</span>
     </div>
-    <input type="range" id="fireCountSlider" min="0" max="6" step="1" value="0" />
+    <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="0" />
   </div>
 </div>
 <div id="continentPanel">
@@ -126,6 +144,7 @@
   <div id="predictionInfo"></div>
   <button id="clearPredictions">Clear</button>
 </div>
+<button id="windToggleBtn" title="Toggle wind direction overlay">🧭</button>
 <div id="globeViz"></div>
 
 <script src="https://unpkg.com/globe.gl"></script>
@@ -220,6 +239,10 @@ function intensityT(frp) {
 }
 
 function fireTooltip(d) {
+  if (d.predicted) {
+    const label = d.count > 1 ? `${d.count} fires, combined FRP ${d.totalFrp.toFixed(1)} MW` : `FRP: ${d.totalFrp.toFixed(1)} MW`;
+    return `Projected ${d.predictionHours}hr position<br/>${label}<br/>Wind: ${d.windSpeedKmh.toFixed(1)} km/h`;
+  }
   if (d.count > 1) {
     return `${d.count} fires clustered here<br/>Combined FRP: ${d.totalFrp.toFixed(1)} MW<br/>Most intense: ${d.maxFrp.toFixed(1)} MW`;
   }
@@ -265,15 +288,6 @@ const world = Globe()
   .polygonStrokeColor(() => '#000000')
   .polygonAltitude(0.005)
   .polygonLabel(d => d.properties?.name ?? '')
-  .arcsData([])
-  .arcStartLat(d => d.startLat)
-  .arcStartLng(d => d.startLng)
-  .arcEndLat(d => d.endLat)
-  .arcEndLng(d => d.endLng)
-  .arcColor(() => '#fff44d')
-  .arcAltitudeAutoScale(0.25)
-  .arcStroke(0.4)
-  .arcsTransitionDuration(0)
   .labelsData([])
   .labelLat(d => d.lat)
   .labelLng(d => d.lng)
@@ -323,16 +337,20 @@ function clusterFires(fires, gridDeg) {
   });
 }
 
-// The labels layer holds only the prediction arrowheads (shown while
-// Prediction is on and a country was searched). Fire markers used to also
-// add a "!" text label per cluster, but each glyph is a real 3D
-// TextGeometry, not a cheap point sprite - in a dense fire complex that
-// meant hundreds of text geometries being (re)built at once, which was the
-// actual cause of the zoom-in lag. Severity is still conveyed by marker
-// color/size, with details on hover.
+// The labels layer holds two things merged together: an arrowhead on each
+// predicted fire's ORIGINAL position pointing toward where it's headed (only
+// while Prediction is on and a country was searched, capped at
+// MAX_PREDICTIONS), and the wind direction overlay (toggled independently
+// via the compass button). Fire markers used to also add a "!" text label
+// per cluster, but each glyph is a real 3D TextGeometry, not a cheap point
+// sprite - in a dense fire complex that meant hundreds of text geometries
+// being (re)built at once, which was the actual cause of the zoom-in lag.
+// Both layers here stay small (one glyph per prediction/grid cell, not per
+// raw fire) so they don't reintroduce that cost.
 let arrowheads = [];
+let windOverlayArrows = [];
 function updateLabelsLayer() {
-  world.labelsData(arrowheads);
+  world.labelsData([...arrowheads, ...windOverlayArrows]);
 }
 
 let lastRenderedFires = [];
@@ -496,16 +514,47 @@ function renderCountryResults(query) {
     });
 }
 
-countrySearch.addEventListener('input', () => renderCountryResults(countrySearch.value.trim()));
+countrySearch.addEventListener('input', () => {
+  const query = countrySearch.value.trim();
+  renderCountryResults(query);
+  if (!query) {
+    // Back to the current world-wide "Fires shown" setting rather than
+    // staying stuck on whatever country was last searched.
+    lastPredictedCountry = null;
+    lastPredictedFires = null;
+    loadFires();
+  }
+});
 
-// --- Fire spread predictions: 24hr projected location (gated by the Prediction toggle, run on country search) ---
+// --- Fire spread predictions: projected location N days out (gated by the Prediction toggle, run on country search) ---
 const predictionToggle = document.getElementById('predictionToggle');
 const predictionPanel = document.getElementById('predictionPanel');
 const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
+const predictionDaysSlider = document.getElementById('predictionDaysSlider');
+const predictionDaysLabel = document.getElementById('predictionDaysLabel');
 const MAX_PREDICTIONS = 150; // safety cap for pathological cases; take the most intense first
 const WIND_GRID_DEG = 0.3; // wind is shared across markers within this grid cell (~30km) to limit API calls
-const PREDICTION_HOURS = 24;
+
+function predictionHours() {
+  return (+predictionDaysSlider.value) * 24;
+}
+
+// Tracks the most recent successful prediction run, so changing the day
+// slider can re-run it at the new range instead of just changing a number
+// nothing looks at.
+let lastPredictedCountry = null;
+let lastPredictedFires = null;
+
+predictionDaysSlider.addEventListener('input', () => {
+  const days = +predictionDaysSlider.value;
+  predictionDaysLabel.textContent = days === 1 ? '1 day' : `${days} days`;
+});
+predictionDaysSlider.addEventListener('change', () => {
+  if (predictionToggle.checked && lastPredictedCountry) {
+    runCountryPredictions(lastPredictedCountry, lastPredictedFires);
+  }
+});
 
 let ALL_FIRES = [];
 
@@ -547,6 +596,55 @@ function bearingToLabelRotation(bearingDeg) {
   return (180 - bearingDeg + 360) % 360;
 }
 
+// --- Wind direction overlay (toggled via the compass button, independent of predictions) ---
+const windToggleBtn = document.getElementById('windToggleBtn');
+let windOverlayOn = false;
+
+// A coarse worldwide sample grid, not one arrow per fire - keeps this to a
+// couple hundred wind lookups (one batched request) and a couple hundred
+// cheap arrow labels regardless of how many fires are loaded.
+function buildWindSampleGrid() {
+  const points = [];
+  for (let lat = -60; lat <= 60; lat += 30) {
+    for (let lng = -180; lng < 180; lng += 30) {
+      points.push({ lat, lng });
+    }
+  }
+  return points;
+}
+
+async function loadWindOverlay() {
+  const points = buildWindSampleGrid();
+  const res = await fetch('/api/wind/batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(points),
+  });
+  if (!res.ok) return;
+  const json = await res.json();
+  windOverlayArrows = json.results.map(wind => ({
+    lat: wind.lat,
+    lng: wind.lng,
+    text: '^',
+    rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
+    color: '#66ccff',
+    size: 0.4,
+    tooltip: `Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
+  }));
+  updateLabelsLayer();
+}
+
+windToggleBtn.addEventListener('click', async () => {
+  windOverlayOn = !windOverlayOn;
+  windToggleBtn.classList.toggle('active', windOverlayOn);
+  if (windOverlayOn) {
+    await loadWindOverlay();
+  } else {
+    windOverlayArrows = [];
+    updateLabelsLayer();
+  }
+});
+
 // Great-circle destination point, `distanceKm` from (lat, lng) along
 // bearingDeg (0=N, 90=E).
 function destinationPoint(lat, lng, bearingDeg, distanceKm) {
@@ -564,8 +662,8 @@ function destinationPoint(lat, lng, bearingDeg, distanceKm) {
 }
 
 // Simplified heuristic: spread distance scales with wind speed and fire
-// intensity (FRP), projected over PREDICTION_HOURS. Not a physical
-// simulation - a demo-grade approximation.
+// intensity (FRP), projected over the chosen number of hours. Not a
+// physical simulation - a demo-grade approximation.
 function spreadDistanceKm(windSpeedKmh, frp, hours) {
   const intensityFactor = Math.min(2.0, 0.5 + Math.log1p(frp) / 5);
   return (0.15 * windSpeedKmh + 0.3) * intensityFactor * (hours / 6);
@@ -574,13 +672,16 @@ function spreadDistanceKm(windSpeedKmh, frp, hours) {
 function clearPredictions() {
   arrowheads = [];
   updateLabelsLayer();
-  world.arcsData([]);
   lastClusters.forEach(c => { c.faded = false; });
   world.pointsData(lastClusters);
   predictionPanel.style.display = 'none';
 }
 
 async function runCountryPredictions(country, fires) {
+  lastPredictedCountry = country;
+  lastPredictedFires = fires;
+  const hours = predictionHours();
+
   clearPredictions();
   predictionPanel.style.display = 'block';
 
@@ -597,7 +698,7 @@ async function runCountryPredictions(country, fires) {
     .sort((a, b) => b.totalFrp - a.totalFrp)
     .slice(0, MAX_PREDICTIONS);
 
-  predictionInfo.innerHTML = `<p>Projecting ${PREDICTION_HOURS}hr fire locations for ${targets.length} marker(s) in ${country.name}...</p>`;
+  predictionInfo.innerHTML = `<p>Projecting ${hours}hr fire locations for ${targets.length} marker(s) in ${country.name}...</p>`;
 
   // Wind barely varies over ~30km, so markers are grouped onto a coarse grid
   // and share one wind lookup per cell. All cells are fetched in a single
@@ -626,13 +727,12 @@ async function runCountryPredictions(country, fires) {
   }
 
   const predictedMarkers = [];
-  const arcs = [];
   const newArrowheads = [];
 
   targets.forEach(c => {
     const wind = windByCell.get(cellOf(c));
     if (!wind) return;
-    const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, PREDICTION_HOURS);
+    const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, hours);
     const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
 
     c.faded = true; // dim the fire's current position in place
@@ -645,34 +745,45 @@ async function runCountryPredictions(country, fires) {
       maxFrp: c.maxFrp,
       fires: c.fires,
       predicted: true,
+      predictionHours: hours,
+      windSpeedKmh: wind.wind_speed_kmh,
     });
-    arcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng });
+    // Arrowhead sits on the ORIGINAL (now faded) marker, pointing toward
+    // where it's headed - simpler than trying to connect the two markers
+    // with a line, and reads fine even for a week-long projection.
     newArrowheads.push({
-      lat: dest.lat,
-      lng: dest.lng,
+      lat: c.lat,
+      lng: c.lng,
       text: '^',
       rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
-      color: '#fff44d',
+      color: '#ffffff',
       size: 0.5,
-      tooltip: `Projected ${PREDICTION_HOURS}hr position<br/>Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
+      tooltip: `Heading toward projected ${hours}hr position<br/>Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
     });
   });
 
   world.pointsData([...lastClusters, ...predictedMarkers]);
-  world.arcsData(arcs);
   arrowheads = newArrowheads;
   updateLabelsLayer();
 
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
-    <p>Projected ${PREDICTION_HOURS}hr position for ${arcs.length} of ${targets.length} marker(s)</p>
+    <p>Projected ${hours}hr position for ${newArrowheads.length} of ${targets.length} marker(s)</p>
   `;
 }
 
-clearPredictionsBtn.addEventListener('click', clearPredictions);
+clearPredictionsBtn.addEventListener('click', () => {
+  lastPredictedCountry = null;
+  lastPredictedFires = null;
+  clearPredictions();
+});
 
 predictionToggle.addEventListener('change', () => {
-  if (!predictionToggle.checked) clearPredictions();
+  if (!predictionToggle.checked) {
+    lastPredictedCountry = null;
+    lastPredictedFires = null;
+    clearPredictions();
+  }
 });
 
 function applyRealisticMode() {
