@@ -239,6 +239,15 @@ function severityColor(t) {
   return `rgb(${r},${g},${b})`;
 }
 
+// Dimmed version of a severity color, used for a fire's old position once a
+// 24hr prediction has been run for it (the new predicted position gets the
+// normal, full-brightness marker instead).
+function fadeColor(rgbString) {
+  const [r, g, b] = rgbString.match(/\d+/g).map(Number);
+  const DARK = 40;
+  return `rgb(${lerp(r, DARK, 0.75) | 0},${lerp(g, DARK, 0.75) | 0},${lerp(b, DARK, 0.75) | 0})`;
+}
+
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
@@ -249,13 +258,22 @@ const world = Globe()
   // render in one batched GPU draw call regardless of count.
   .pointAltitude(0.004)
   .pointRadius(d => lerp(0.04, 0.14, intensityT(d.totalFrp)))
-  .pointColor(d => severityColor(intensityT(d.totalFrp)))
+  .pointColor(d => (d.faded ? fadeColor(severityColor(intensityT(d.totalFrp))) : severityColor(intensityT(d.totalFrp))))
   .pointLabel(fireTooltip)
   .polygonCapColor(() => 'rgba(0,0,0,0)')
   .polygonSideColor(() => 'rgba(0,0,0,0)')
   .polygonStrokeColor(() => '#000000')
   .polygonAltitude(0.005)
   .polygonLabel(d => d.properties?.name ?? '')
+  .arcsData([])
+  .arcStartLat(d => d.startLat)
+  .arcStartLng(d => d.startLng)
+  .arcEndLat(d => d.endLat)
+  .arcEndLng(d => d.endLng)
+  .arcColor(() => '#fff44d')
+  .arcAltitudeAutoScale(0.25)
+  .arcStroke(0.4)
+  .arcsTransitionDuration(0)
   .labelsData([])
   .labelLat(d => d.lat)
   .labelLng(d => d.lng)
@@ -305,25 +323,38 @@ function clusterFires(fires, gridDeg) {
   });
 }
 
-// The labels layer is used only for prediction arrows (shown while
-// Prediction is on and a country was searched, capped at
-// MAX_FIRES_FOR_ARROWS). Fire markers used to also add a "!" text label per
-// cluster, but each glyph is a real 3D TextGeometry, not a cheap point
-// sprite - in a dense fire complex that meant hundreds of text geometries
-// being (re)built at once, which was the actual cause of the zoom-in lag.
-// Severity is still conveyed by marker color/size, with details on hover.
-let windArrows = [];
+// The labels layer holds only the prediction arrowheads (shown while
+// Prediction is on and a country was searched). Fire markers used to also
+// add a "!" text label per cluster, but each glyph is a real 3D
+// TextGeometry, not a cheap point sprite - in a dense fire complex that
+// meant hundreds of text geometries being (re)built at once, which was the
+// actual cause of the zoom-in lag. Severity is still conveyed by marker
+// color/size, with details on hover.
+let arrowheads = [];
 function updateLabelsLayer() {
-  world.labelsData(windArrows);
+  world.labelsData(arrowheads);
 }
 
 let lastRenderedFires = [];
+let lastClusters = [];
 
-function renderFireMarkers(fires) {
+function renderFireMarkers(fires, altitudeOverride) {
   lastRenderedFires = fires;
-  const gridDeg = gridForAltitude(world.pointOfView().altitude);
-  const clusters = clusterFires(fires, gridDeg);
-  world.pointsData(clusters);
+  // world.pointOfView().altitude reflects the camera's CURRENT position,
+  // which mid-flyTo is some in-between value, not the destination - reading
+  // it right after a country search (before the 1s flight finishes) picked
+  // the wrong cluster grid size and threw off cluster centroids. Callers
+  // that know the real target altitude (e.g. a just-searched country) pass
+  // it explicitly instead of relying on a live camera read.
+  const altitude = altitudeOverride ?? world.pointOfView().altitude;
+  const gridDeg = gridForAltitude(altitude);
+  currentZoomTier = gridDeg;
+  lastClusters = clusterFires(fires, gridDeg);
+  world.pointsData(lastClusters);
+  // Re-clustering invalidates any faded/predicted markers from a previous
+  // prediction run (they were tied to the old cluster positions), so clear
+  // them rather than leave a stale, misaligned prediction on screen.
+  clearPredictions();
 }
 
 // Re-cluster (not re-fetch) whenever the camera crosses into a different
@@ -382,6 +413,37 @@ function boundsOf(feature) {
   };
 }
 
+// Standard even-odd ray-casting point-in-polygon test. `ring` is a GeoJSON
+// coordinate ring, [[lng,lat], ...].
+function pointInRing(lat, lng, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    const intersects = yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+// Whether (lat, lng) falls inside a country's actual GeoJSON shape (Polygon
+// or MultiPolygon, respecting holes) - not just its bounding box. A
+// bounding-box fetch alone lets fires from neighboring countries through
+// (e.g. France's rectangle overlaps parts of Switzerland/Germany/Italy);
+// this is the precise filter applied on top of that fetch.
+function pointInCountryGeometry(lat, lng, geometry) {
+  const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
+  for (const polygon of polygons) {
+    if (!pointInRing(lat, lng, polygon[0])) continue;
+    let inHole = false;
+    for (let h = 1; h < polygon.length; h++) {
+      if (pointInRing(lat, lng, polygon[h])) { inHole = true; break; }
+    }
+    if (!inHole) return true;
+  }
+  return false;
+}
+
 let COUNTRY_LIST = [];
 const countrySearch = document.getElementById('countrySearch');
 const countryResults = document.getElementById('countryResults');
@@ -395,6 +457,8 @@ async function loadCountryBorders() {
   COUNTRY_LIST = countries.map(f => {
     const b = boundsOf(f);
     // pad the bbox a bit so fires just across a border/coastline aren't missed
+    // by the initial fetch - the precise polygon filter below still excludes
+    // them from the final result if they're genuinely outside the country.
     const pad = 0.75;
     return {
       name: f.properties.name,
@@ -405,6 +469,7 @@ async function loadCountryBorders() {
       maxLat: clamp(b.maxLat + pad, -90, 90),
       minLng: clamp(b.minLng - pad, -180, 180),
       maxLng: clamp(b.maxLng + pad, -180, 180),
+      geometry: f.geometry,
     };
   });
 }
@@ -433,20 +498,26 @@ function renderCountryResults(query) {
 
 countrySearch.addEventListener('input', () => renderCountryResults(countrySearch.value.trim()));
 
-// --- Fire spread direction arrows (gated by the Prediction toggle, run on country search) ---
+// --- Fire spread predictions: 24hr projected location (gated by the Prediction toggle, run on country search) ---
 const predictionToggle = document.getElementById('predictionToggle');
 const predictionPanel = document.getElementById('predictionPanel');
 const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
-const MAX_FIRES_FOR_ARROWS = 300; // safety cap for pathological cases; take the most intense first
-const WIND_GRID_DEG = 0.3; // wind is shared across fires within this grid cell (~30km) to limit API calls
+const MAX_PREDICTIONS = 150; // safety cap for pathological cases; take the most intense first
+const WIND_GRID_DEG = 0.3; // wind is shared across markers within this grid cell (~30km) to limit API calls
+const PREDICTION_HOURS = 24;
 
 let ALL_FIRES = [];
 
 // Fetches the accurate, full fire set for a country's bbox (the initial world
-// view only holds the top ~500 most intense fires globally, so smaller/less
-// intense fires in a given country may be missing from it) and merges it into
-// the displayed points.
+// view only holds a capped highest-intensity subset - see the fire count
+// slider - so smaller/less intense fires in a given country may be missing
+// from it). Renders ONLY this country's fires, replacing whatever was shown
+// before - merging into the accumulated world dataset used to mean a search
+// after "Show all fires" reclustered and predicted on the entire world's
+// fires at the country's fine zoom grid (slow, and predictions landed
+// wherever the globally most intense fires happened to be, not in the
+// searched country).
 async function loadCountryFires(country) {
   statusEl.textContent = `Loading fires for ${country.name}...`;
   const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
@@ -455,14 +526,15 @@ async function loadCountryFires(country) {
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
 
-    const seen = new Set(ALL_FIRES.map(f => `${f.lat},${f.lng},${f.acq_time}`));
-    json.fires.forEach(f => {
-      const key = `${f.lat},${f.lng},${f.acq_time}`;
-      if (!seen.has(key)) { seen.add(key); ALL_FIRES.push(f); }
-    });
-    renderFireMarkers(ALL_FIRES);
-    statusEl.textContent = `${json.fires.length} active fire detections in ${country.name} (${ALL_FIRES.length} shown total)`;
-    return json.fires;
+    // The bbox fetch is a rectangle around the country's shape, so it also
+    // pulls in fires from neighboring countries that fall inside that
+    // rectangle but outside the country itself - filter against the actual
+    // polygon to keep only fires genuinely within its borders.
+    const fires = json.fires.filter(f => pointInCountryGeometry(f.lat, f.lng, country.geometry));
+
+    renderFireMarkers(fires, country.altitude);
+    statusEl.textContent = `${fires.length} active fire detections in ${country.name}`;
+    return fires;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     return [];
@@ -475,9 +547,41 @@ function bearingToLabelRotation(bearingDeg) {
   return (180 - bearingDeg + 360) % 360;
 }
 
-async function runCountryPredictions(country, fires) {
-  windArrows = [];
+// Great-circle destination point, `distanceKm` from (lat, lng) along
+// bearingDeg (0=N, 90=E).
+function destinationPoint(lat, lng, bearingDeg, distanceKm) {
+  const R = 6371;
+  const bearing = (bearingDeg * Math.PI) / 180;
+  const lat1 = (lat * Math.PI) / 180;
+  const lng1 = (lng * Math.PI) / 180;
+  const dR = distanceKm / R;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(dR) + Math.cos(lat1) * Math.sin(dR) * Math.cos(bearing));
+  const lng2 = lng1 + Math.atan2(
+    Math.sin(bearing) * Math.sin(dR) * Math.cos(lat1),
+    Math.cos(dR) - Math.sin(lat1) * Math.sin(lat2)
+  );
+  return { lat: (lat2 * 180) / Math.PI, lng: (((lng2 * 180) / Math.PI + 540) % 360) - 180 };
+}
+
+// Simplified heuristic: spread distance scales with wind speed and fire
+// intensity (FRP), projected over PREDICTION_HOURS. Not a physical
+// simulation - a demo-grade approximation.
+function spreadDistanceKm(windSpeedKmh, frp, hours) {
+  const intensityFactor = Math.min(2.0, 0.5 + Math.log1p(frp) / 5);
+  return (0.15 * windSpeedKmh + 0.3) * intensityFactor * (hours / 6);
+}
+
+function clearPredictions() {
+  arrowheads = [];
   updateLabelsLayer();
+  world.arcsData([]);
+  lastClusters.forEach(c => { c.faded = false; });
+  world.pointsData(lastClusters);
+  predictionPanel.style.display = 'none';
+}
+
+async function runCountryPredictions(country, fires) {
+  clearPredictions();
   predictionPanel.style.display = 'block';
 
   if (fires.length === 0) {
@@ -485,68 +589,90 @@ async function runCountryPredictions(country, fires) {
     return;
   }
 
-  const targets = fires
+  // Predict per currently-displayed marker (cluster), not per raw detection -
+  // that's what's actually visible on screen, and keeps the prediction count
+  // bounded even for a country with hundreds of individual fire detections.
+  const targets = lastClusters
     .slice()
-    .sort((a, b) => b.frp - a.frp)
-    .slice(0, MAX_FIRES_FOR_ARROWS);
+    .sort((a, b) => b.totalFrp - a.totalFrp)
+    .slice(0, MAX_PREDICTIONS);
 
-  predictionInfo.innerHTML = `<p>Calculating spread direction for ${targets.length} fire(s) in ${country.name}...</p>`;
+  predictionInfo.innerHTML = `<p>Projecting ${PREDICTION_HOURS}hr fire locations for ${targets.length} marker(s) in ${country.name}...</p>`;
 
-  // Wind barely varies over ~30km, so fires are grouped onto a coarse grid
-  // and share one wind lookup per cell - keeps this fast even for a country
-  // with hundreds of active fires, while every fire still gets its own arrow.
-  const cellOf = fire => `${Math.round(fire.lat / WIND_GRID_DEG)},${Math.round(fire.lng / WIND_GRID_DEG)}`;
+  // Wind barely varies over ~30km, so markers are grouped onto a coarse grid
+  // and share one wind lookup per cell. All cells are fetched in a single
+  // request (Open-Meteo supports comma-separated lat/lng lists natively) -
+  // firing one request per cell, even in parallel, was the main source of
+  // the slowness for a country with many visible markers.
+  const cellOf = c => `${Math.round(c.lat / WIND_GRID_DEG)},${Math.round(c.lng / WIND_GRID_DEG)}`;
   const cellCenters = new Map();
-  targets.forEach(fire => {
-    const key = cellOf(fire);
-    if (!cellCenters.has(key)) cellCenters.set(key, fire);
+  targets.forEach(c => {
+    const key = cellOf(c);
+    if (!cellCenters.has(key)) cellCenters.set(key, c);
   });
 
   const windByCell = new Map();
-  await Promise.allSettled(
-    [...cellCenters.entries()].map(async ([key, fire]) => {
-      const params = new URLSearchParams({ lat: fire.lat, lng: fire.lng });
-      const res = await fetch('/api/wind?' + params.toString());
+  const cellEntries = [...cellCenters.entries()];
+  if (cellEntries.length > 0) {
+    const res = await fetch('/api/wind/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cellEntries.map(([, c]) => ({ lat: c.lat, lng: c.lng }))),
+    });
+    if (res.ok) {
       const json = await res.json();
-      if (res.ok) windByCell.set(key, json);
-    })
-  );
+      json.results.forEach((wind, i) => windByCell.set(cellEntries[i][0], wind));
+    }
+  }
 
-  windArrows = targets
-    .map(fire => {
-      const wind = windByCell.get(cellOf(fire));
-      if (!wind) return null;
-      return {
-        lat: fire.lat,
-        lng: fire.lng,
-        text: '^',
-        rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
-        color: '#fff44d',
-        size: 0.5,
-        tooltip: `Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
-      };
-    })
-    .filter(Boolean);
+  const predictedMarkers = [];
+  const arcs = [];
+  const newArrowheads = [];
 
+  targets.forEach(c => {
+    const wind = windByCell.get(cellOf(c));
+    if (!wind) return;
+    const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, PREDICTION_HOURS);
+    const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
+
+    c.faded = true; // dim the fire's current position in place
+
+    predictedMarkers.push({
+      lat: dest.lat,
+      lng: dest.lng,
+      count: c.count,
+      totalFrp: c.totalFrp,
+      maxFrp: c.maxFrp,
+      fires: c.fires,
+      predicted: true,
+    });
+    arcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng });
+    newArrowheads.push({
+      lat: dest.lat,
+      lng: dest.lng,
+      text: '^',
+      rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
+      color: '#fff44d',
+      size: 0.5,
+      tooltip: `Projected ${PREDICTION_HOURS}hr position<br/>Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
+    });
+  });
+
+  world.pointsData([...lastClusters, ...predictedMarkers]);
+  world.arcsData(arcs);
+  arrowheads = newArrowheads;
   updateLabelsLayer();
+
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
-    <p>Showing spread direction for ${windArrows.length} of ${targets.length} fire(s)</p>
+    <p>Projected ${PREDICTION_HOURS}hr position for ${arcs.length} of ${targets.length} marker(s)</p>
   `;
 }
 
-clearPredictionsBtn.addEventListener('click', () => {
-  windArrows = [];
-  updateLabelsLayer();
-  predictionPanel.style.display = 'none';
-});
+clearPredictionsBtn.addEventListener('click', clearPredictions);
 
 predictionToggle.addEventListener('change', () => {
-  if (!predictionToggle.checked) {
-    windArrows = [];
-    updateLabelsLayer();
-    predictionPanel.style.display = 'none';
-  }
+  if (!predictionToggle.checked) clearPredictions();
 });
 
 function applyRealisticMode() {

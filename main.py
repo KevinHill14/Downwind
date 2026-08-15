@@ -5,6 +5,7 @@ Serves:
 - GET /                -> frontend (static/index.html)
 - GET /api/fires       -> live fire detections from NASA FIRMS (VIIRS NRT), as GeoJSON-ish points
 - GET /api/wind        -> live wind speed/direction for a location, used to point each fire's arrow
+- POST /api/wind/batch -> wind for many locations in a single Open-Meteo request
 
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
@@ -17,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
 FIRMS_SOURCE = "VIIRS_SNPP_NRT"  # ~375m resolution, updated every ~3-4 hours
@@ -144,6 +146,48 @@ async def get_wind(lat: float = Query(...), lng: float = Query(...)):
     """Live wind for a location - used to point each fire's direction arrow."""
     speed, wind_dir = await _fetch_wind(lat, lng)
     return {"wind_speed_kmh": speed, "wind_blowing_toward_deg": wind_dir}
+
+
+class WindPoint(BaseModel):
+    lat: float
+    lng: float
+
+
+@app.post("/api/wind/batch")
+async def get_wind_batch(points: list[WindPoint]):
+    """Wind for many locations at once, e.g. one per predicted fire cluster.
+    Open-Meteo supports comma-separated lat/lng lists natively, so this is
+    ONE outbound request regardless of point count - fetching wind for each
+    point with its own request (even in parallel) was the main bottleneck
+    when predicting for many markers at once."""
+    if not points:
+        return {"results": []}
+
+    params = {
+        "latitude": ",".join(str(p.lat) for p in points),
+        "longitude": ",".join(str(p.lng) for p in points),
+        "current": "wind_speed_10m,wind_direction_10m",
+        "wind_speed_unit": "kmh",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(WIND_URL, params=params)
+        resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict):  # Open-Meteo returns a plain object for a single point
+        data = [data]
+
+    results = []
+    for point, entry in zip(points, data):
+        current = entry["current"]
+        results.append(
+            {
+                "lat": point.lat,
+                "lng": point.lng,
+                "wind_speed_kmh": current["wind_speed_10m"],
+                "wind_blowing_toward_deg": (current["wind_direction_10m"] + 180) % 360,
+            }
+        )
+    return {"results": results}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
