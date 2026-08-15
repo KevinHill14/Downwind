@@ -30,6 +30,20 @@
   input:checked + .slider { background-color: #2ecc71; }
   input:checked + .slider::before { transform: translateX(18px); }
 
+  #fireCountRow { display: flex; flex-direction: column; gap: 6px; }
+  #fireCountRow .rowTop { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #fireCountSlider {
+    -webkit-appearance: none; appearance: none; width: 140px; height: 4px;
+    background: #555; border-radius: 2px; outline: none; margin: 0;
+  }
+  #fireCountSlider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: #e25822; cursor: pointer;
+  }
+  #fireCountSlider::-moz-range-thumb {
+    width: 14px; height: 14px; border: none; border-radius: 50%; background: #e25822; cursor: pointer;
+  }
+
   #continentPanel {
     position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
@@ -86,12 +100,12 @@
       <span class="slider"></span>
     </label>
   </div>
-  <div class="switchRow">
-    <span>Show all fires</span>
-    <label class="switch">
-      <input type="checkbox" id="showAllToggle" />
-      <span class="slider"></span>
-    </label>
+  <div id="fireCountRow">
+    <div class="rowTop">
+      <span>Fires shown</span>
+      <span id="fireCountLabel">2.5k</span>
+    </div>
+    <input type="range" id="fireCountSlider" min="0" max="6" step="1" value="0" />
   </div>
 </div>
 <div id="continentPanel">
@@ -198,23 +212,131 @@ function getSimpleTexture() {
   return simpleTexturePromise;
 }
 
+// Fire severity scale: log-normalized so a handful of very intense fires
+// (or clusters) don't wash out everything else at max marker size.
+const FRP_SCALE_REF = 150; // MW - combined FRP that reads as "maximum severity"
+function intensityT(frp) {
+  return clamp(Math.log1p(frp) / Math.log1p(FRP_SCALE_REF), 0, 1);
+}
+
+function fireTooltip(d) {
+  if (d.count > 1) {
+    return `${d.count} fires clustered here<br/>Combined FRP: ${d.totalFrp.toFixed(1)} MW<br/>Most intense: ${d.maxFrp.toFixed(1)} MW`;
+  }
+  const f = d.fires[0];
+  return `FRP: ${f.frp} MW<br/>Confidence: ${f.confidence}<br/>${f.acq_date} ${f.acq_time}`;
+}
+
+// Severity color: yellow (light) -> orange (middle) -> red (bad).
+const SEVERITY_YELLOW = [255, 221, 51];
+const SEVERITY_ORANGE = [255, 140, 20];
+const SEVERITY_RED = [200, 30, 20];
+function severityColor(t) {
+  const [c1, c2, u] = t < 0.5 ? [SEVERITY_YELLOW, SEVERITY_ORANGE, t * 2] : [SEVERITY_ORANGE, SEVERITY_RED, (t - 0.5) * 2];
+  const r = lerp(c1[0], c2[0], u) | 0;
+  const g = lerp(c1[1], c2[1], u) | 0;
+  const b = lerp(c1[2], c2[2], u) | 0;
+  return `rgb(${r},${g},${b})`;
+}
+
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
-  .pointAltitude(0.02)
-  .pointRadius(d => Math.max(0.2, Math.min(1, Math.log1p(d.frp) / 8)))
-  .pointColor(() => '#ff5522')
-  .pointLabel(d => `FRP: ${d.frp} MW<br/>Confidence: ${d.confidence}<br/>${d.acq_date} ${d.acq_time}`)
+  // Plain WebGL points, not HTML/DOM elements: three-globe repositions every
+  // marker's screen transform on every animation frame as the camera moves,
+  // and doing that for thousands of live DOM nodes (each also paying a
+  // box-shadow blur repaint) was the real cause of the lag - WebGL points
+  // render in one batched GPU draw call regardless of count.
+  .pointAltitude(0.004)
+  .pointRadius(d => lerp(0.04, 0.14, intensityT(d.totalFrp)))
+  .pointColor(d => severityColor(intensityT(d.totalFrp)))
+  .pointLabel(fireTooltip)
   .polygonCapColor(() => 'rgba(0,0,0,0)')
   .polygonSideColor(() => 'rgba(0,0,0,0)')
   .polygonStrokeColor(() => '#000000')
   .polygonAltitude(0.005)
   .polygonLabel(d => d.properties?.name ?? '')
-  .pathPoints(p => p)
-  .pathPointLat(p => p.lat)
-  .pathPointLng(p => p.lng)
-  .pathColor(() => 'rgba(255,140,0,0.9)')
-  .pathStroke(2);
+  .labelsData([])
+  .labelLat(d => d.lat)
+  .labelLng(d => d.lng)
+  .labelText(d => d.text)
+  .labelRotation(d => d.rot)
+  .labelLabel(d => d.tooltip ?? '')
+  .labelSize(d => d.size)
+  .labelColor(d => d.color)
+  .labelDotRadius(0)
+  .labelIncludeDot(false)
+  .labelResolution(3)
+  .labelAltitude(0.006)
+  .labelsTransitionDuration(0);
+
+// Groups fires within gridDeg of each other into a single marker, purely to
+// reduce visual clutter - the underlying detections are kept (in `.fires`)
+// rather than discarded, so nothing about the data is lost, only how
+// densely-packed detections are displayed. The grid size scales with camera
+// altitude (see gridForAltitude): coarse/few clusters at whole-earth zoom
+// where thousands of individual points would be both unreadable and slow to
+// render, fine-grained detail once zoomed into a region - the same
+// zoom-dependent level-of-detail technique 2D map tools use to stay fast.
+function gridForAltitude(altitude) {
+  if (altitude > 1.2) return 2.0; // whole-earth view - a handful of regional blobs
+  if (altitude > 0.6) return 0.5;
+  if (altitude > 0.2) return 0.15;
+  return 0.05; // zoomed into a country - full detail (~5.5km)
+}
+
+function clusterFires(fires, gridDeg) {
+  const groups = new Map();
+  fires.forEach(f => {
+    const key = `${Math.round(f.lat / gridDeg)},${Math.round(f.lng / gridDeg)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  });
+
+  return [...groups.values()].map(group => {
+    const totalFrp = group.reduce((sum, f) => sum + f.frp, 0);
+    const maxFrp = Math.max(...group.map(f => f.frp));
+    // FRP-weighted centroid, so the marker sits nearer the most intense
+    // detections rather than a plain geographic average.
+    const weight = totalFrp || group.length;
+    const lat = group.reduce((sum, f) => sum + f.lat * (f.frp || 1), 0) / weight;
+    const lng = group.reduce((sum, f) => sum + f.lng * (f.frp || 1), 0) / weight;
+    return { lat, lng, count: group.length, totalFrp, maxFrp, fires: group };
+  });
+}
+
+// The labels layer is used only for prediction arrows (shown while
+// Prediction is on and a country was searched, capped at
+// MAX_FIRES_FOR_ARROWS). Fire markers used to also add a "!" text label per
+// cluster, but each glyph is a real 3D TextGeometry, not a cheap point
+// sprite - in a dense fire complex that meant hundreds of text geometries
+// being (re)built at once, which was the actual cause of the zoom-in lag.
+// Severity is still conveyed by marker color/size, with details on hover.
+let windArrows = [];
+function updateLabelsLayer() {
+  world.labelsData(windArrows);
+}
+
+let lastRenderedFires = [];
+
+function renderFireMarkers(fires) {
+  lastRenderedFires = fires;
+  const gridDeg = gridForAltitude(world.pointOfView().altitude);
+  const clusters = clusterFires(fires, gridDeg);
+  world.pointsData(clusters);
+}
+
+// Re-cluster (not re-fetch) whenever the camera crosses into a different
+// zoom tier, so the marker count adapts to what's actually legible/fast at
+// the current view without hitting the network again.
+let currentZoomTier = null;
+world.controls().addEventListener('change', () => {
+  if (lastRenderedFires.length === 0) return;
+  const tier = gridForAltitude(world.pointOfView().altitude);
+  if (tier === currentZoomTier) return;
+  currentZoomTier = tier;
+  renderFireMarkers(lastRenderedFires);
+});
 
 // Approximate polygon area (shoelace formula on raw lon/lat) - only used to
 // rank ring sizes, not for precise measurement.
@@ -311,12 +433,13 @@ function renderCountryResults(query) {
 
 countrySearch.addEventListener('input', () => renderCountryResults(countrySearch.value.trim()));
 
-// --- Fire spread predictions (gated by the Prediction toggle, run on country search) ---
+// --- Fire spread direction arrows (gated by the Prediction toggle, run on country search) ---
 const predictionToggle = document.getElementById('predictionToggle');
 const predictionPanel = document.getElementById('predictionPanel');
 const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
-const MAX_PREDICTIONS_PER_COUNTRY = 15; // cap concurrent API calls
+const MAX_FIRES_FOR_ARROWS = 300; // safety cap for pathological cases; take the most intense first
+const WIND_GRID_DEG = 0.3; // wind is shared across fires within this grid cell (~30km) to limit API calls
 
 let ALL_FIRES = [];
 
@@ -337,7 +460,7 @@ async function loadCountryFires(country) {
       const key = `${f.lat},${f.lng},${f.acq_time}`;
       if (!seen.has(key)) { seen.add(key); ALL_FIRES.push(f); }
     });
-    world.pointsData(ALL_FIRES);
+    renderFireMarkers(ALL_FIRES);
     statusEl.textContent = `${json.fires.length} active fire detections in ${country.name} (${ALL_FIRES.length} shown total)`;
     return json.fires;
   } catch (err) {
@@ -346,8 +469,15 @@ async function loadCountryFires(country) {
   }
 }
 
+// Label glyphs point "south" (down-screen) at rotation 0, rotating clockwise
+// from there - empirically verified against the compass, not a documented API.
+function bearingToLabelRotation(bearingDeg) {
+  return (180 - bearingDeg + 360) % 360;
+}
+
 async function runCountryPredictions(country, fires) {
-  world.pathsData([]);
+  windArrows = [];
+  updateLabelsLayer();
   predictionPanel.style.display = 'block';
 
   if (fires.length === 0) {
@@ -358,39 +488,63 @@ async function runCountryPredictions(country, fires) {
   const targets = fires
     .slice()
     .sort((a, b) => b.frp - a.frp)
-    .slice(0, MAX_PREDICTIONS_PER_COUNTRY);
+    .slice(0, MAX_FIRES_FOR_ARROWS);
 
-  predictionInfo.innerHTML = `<p>Predicting spread for ${targets.length} of ${fires.length} fire(s) in ${country.name}...</p>`;
+  predictionInfo.innerHTML = `<p>Calculating spread direction for ${targets.length} fire(s) in ${country.name}...</p>`;
 
-  const results = await Promise.allSettled(
-    targets.map(fire => {
-      const params = new URLSearchParams({ lat: fire.lat, lng: fire.lng, frp: fire.frp, hours: 6 });
-      return fetch('/api/predict?' + params.toString()).then(res => res.json());
+  // Wind barely varies over ~30km, so fires are grouped onto a coarse grid
+  // and share one wind lookup per cell - keeps this fast even for a country
+  // with hundreds of active fires, while every fire still gets its own arrow.
+  const cellOf = fire => `${Math.round(fire.lat / WIND_GRID_DEG)},${Math.round(fire.lng / WIND_GRID_DEG)}`;
+  const cellCenters = new Map();
+  targets.forEach(fire => {
+    const key = cellOf(fire);
+    if (!cellCenters.has(key)) cellCenters.set(key, fire);
+  });
+
+  const windByCell = new Map();
+  await Promise.allSettled(
+    [...cellCenters.entries()].map(async ([key, fire]) => {
+      const params = new URLSearchParams({ lat: fire.lat, lng: fire.lng });
+      const res = await fetch('/api/wind?' + params.toString());
+      const json = await res.json();
+      if (res.ok) windByCell.set(key, json);
     })
   );
 
-  const perimeters = results
-    .filter(r => r.status === 'fulfilled' && r.value.perimeter)
-    .map(r => {
-      const pts = r.value.perimeter;
-      return [...pts, pts[0]]; // close the ring
-    });
+  windArrows = targets
+    .map(fire => {
+      const wind = windByCell.get(cellOf(fire));
+      if (!wind) return null;
+      return {
+        lat: fire.lat,
+        lng: fire.lng,
+        text: '^',
+        rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
+        color: '#fff44d',
+        size: 0.5,
+        tooltip: `Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
+      };
+    })
+    .filter(Boolean);
 
-  world.pathsData(perimeters);
+  updateLabelsLayer();
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
-    <p>Predicted 6hr spread for ${perimeters.length} of ${targets.length} fire(s) shown in orange</p>
+    <p>Showing spread direction for ${windArrows.length} of ${targets.length} fire(s)</p>
   `;
 }
 
 clearPredictionsBtn.addEventListener('click', () => {
-  world.pathsData([]);
+  windArrows = [];
+  updateLabelsLayer();
   predictionPanel.style.display = 'none';
 });
 
 predictionToggle.addEventListener('change', () => {
   if (!predictionToggle.checked) {
-    world.pathsData([]);
+    windArrows = [];
+    updateLabelsLayer();
     predictionPanel.style.display = 'none';
   }
 });
@@ -431,29 +585,36 @@ document.querySelectorAll('#continentPanel button').forEach(btn => {
   });
 });
 
-const INITIAL_WORLD_FIRE_LIMIT = 2500; // fast first paint; full per-country detail loads on search
-const showAllToggle = document.getElementById('showAllToggle');
+// Slider steps replace the old all-or-nothing toggle: fast initial paint at
+// 2.5k, working up to the full worldwide dataset.
+const FIRE_COUNT_STEPS = [2500, 10000, 20000, 30000, 40000, 50000, null]; // null = all
+const FIRE_COUNT_LABELS = ['2.5k', '10k', '20k', '30k', '40k', '50k', 'All'];
+const fireCountSlider = document.getElementById('fireCountSlider');
+const fireCountLabel = document.getElementById('fireCountLabel');
 
 async function loadFires() {
-  const showAll = showAllToggle.checked;
-  statusEl.textContent = showAll ? 'Loading all fires worldwide...' : 'Loading fire data...';
+  const limit = FIRE_COUNT_STEPS[+fireCountSlider.value];
+  statusEl.textContent = limit ? 'Loading fire data...' : 'Loading all fires worldwide...';
   try {
-    const url = showAll ? '/api/fires' : `/api/fires?limit=${INITIAL_WORLD_FIRE_LIMIT}`;
+    const url = limit ? `/api/fires?limit=${limit}` : '/api/fires';
     const res = await fetch(url);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
     ALL_FIRES = json.fires;
-    world.pointsData(json.fires);
-    statusEl.textContent = showAll
-      ? `${json.fires.length} active fire detections worldwide`
-      : `${json.fires.length} highest-intensity fire detections worldwide (search a country for full detail)`;
+    renderFireMarkers(ALL_FIRES);
+    statusEl.textContent = limit
+      ? `${json.fires.length} highest-intensity fire detections worldwide (search a country for full detail)`
+      : `${json.fires.length} active fire detections worldwide`;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
   }
 }
 
-showAllToggle.addEventListener('change', loadFires);
+fireCountSlider.addEventListener('input', () => {
+  fireCountLabel.textContent = FIRE_COUNT_LABELS[+fireCountSlider.value];
+});
+fireCountSlider.addEventListener('change', loadFires);
 
 loadFires();
 </script>

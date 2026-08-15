@@ -4,12 +4,11 @@ Fire Tracker backend.
 Serves:
 - GET /                -> frontend (static/index.html)
 - GET /api/fires       -> live fire detections from NASA FIRMS (VIIRS NRT), as GeoJSON-ish points
-- GET /api/predict     -> heuristic spread prediction for a fire, using live wind data
+- GET /api/wind        -> live wind speed/direction for a location, used to point each fire's arrow
 
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
 """
-import math
 import os
 import time
 
@@ -140,66 +139,11 @@ async def _fetch_wind(lat: float, lng: float) -> tuple[float, float]:
     return speed, blowing_toward
 
 
-def _destination_point(lat: float, lng: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
-    """Move `distance_km` from (lat, lng) along `bearing_deg` (0=N, 90=E), great-circle."""
-    R = 6371.0
-    lat1 = math.radians(lat)
-    lng1 = math.radians(lng)
-    brng = math.radians(bearing_deg)
-    d_r = distance_km / R
-
-    lat2 = math.asin(
-        math.sin(lat1) * math.cos(d_r) + math.cos(lat1) * math.sin(d_r) * math.cos(brng)
-    )
-    lng2 = lng1 + math.atan2(
-        math.sin(brng) * math.sin(d_r) * math.cos(lat1),
-        math.cos(d_r) - math.sin(lat1) * math.sin(lat2),
-    )
-    return math.degrees(lat2), (math.degrees(lng2) + 540) % 360 - 180
-
-
-@app.get("/api/predict")
-async def predict_spread(
-    lat: float = Query(...),
-    lng: float = Query(...),
-    frp: float = Query(10.0, description="Fire radiative power (MW), intensity proxy"),
-    hours: float = Query(6.0, description="Hours to project forward"),
-):
-    """
-    Heuristic (not physical) spread model, for demo purposes:
-    - Live wind speed/direction fetched from Open-Meteo for the fire's location.
-    - Base spread rate scales with wind speed and fire intensity (FRP).
-    - Spread is elliptical: fastest downwind, slower crosswind/upwind
-      (rough approximation of real fire behavior, e.g. Rothermel-style anisotropy).
-    - Returns a polygon (list of lat/lng points) approximating the predicted perimeter.
-    """
-    wind_speed, wind_dir = await _fetch_wind(lat, lng)
-
-    intensity_factor = min(2.0, 0.5 + math.log1p(frp) / 5)
-    downwind_km = (0.15 * wind_speed + 0.3) * intensity_factor * hours / 6
-    crosswind_km = downwind_km * 0.4
-    upwind_km = downwind_km * 0.15
-
-    perimeter = []
-    n_points = 36
-    for i in range(n_points):
-        theta = 2 * math.pi * i / n_points  # 0 = downwind direction
-        if math.cos(theta) >= 0:
-            r = math.sqrt((downwind_km * math.cos(theta)) ** 2 + (crosswind_km * math.sin(theta)) ** 2)
-        else:
-            r = math.sqrt((upwind_km * math.cos(theta)) ** 2 + (crosswind_km * math.sin(theta)) ** 2)
-        bearing = (wind_dir + math.degrees(theta)) % 360
-        plat, plng = _destination_point(lat, lng, bearing, r)
-        perimeter.append({"lat": plat, "lng": plng})
-
-    return {
-        "origin": {"lat": lat, "lng": lng},
-        "hours": hours,
-        "wind_speed_kmh": wind_speed,
-        "wind_blowing_toward_deg": wind_dir,
-        "perimeter": perimeter,
-        "note": "Simplified heuristic model for demo purposes, not a physical fire behavior simulation.",
-    }
+@app.get("/api/wind")
+async def get_wind(lat: float = Query(...), lng: float = Query(...)):
+    """Live wind for a location - used to point each fire's direction arrow."""
+    speed, wind_dir = await _fetch_wind(lat, lng)
+    return {"wind_speed_kmh": speed, "wind_blowing_toward_deg": wind_dir}
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
