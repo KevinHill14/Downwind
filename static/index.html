@@ -120,6 +120,13 @@
   </div>
   <div class="sliderRow">
     <div class="rowTop">
+      <span>Prediction strength</span>
+      <span id="predictionStrengthLabel">1: Basic</span>
+    </div>
+    <input type="range" class="rangeSlider" id="predictionStrengthSlider" min="1" max="4" step="1" value="1" />
+  </div>
+  <div class="sliderRow">
+    <div class="rowTop">
       <span>Fires shown</span>
       <span id="fireCountLabel">2.5k</span>
     </div>
@@ -311,7 +318,21 @@ const world = Globe()
   .arcAltitude(0.008) // fixed, not auto-scaled - these spread distances are short
   // enough (tens to low-hundreds of km) that auto altitude flattened arcs
   // right onto the surface and they z-fought with the globe texture
-  .arcsTransitionDuration(0);
+  .arcsTransitionDuration(0)
+  // Multi-point trajectory for prediction strength 2+ (hourly-stepped path,
+  // bending as the wind shifts), as opposed to the single straight arc
+  // strength 1 uses.
+  .pathsData([])
+  .pathPoints(d => d.points)
+  .pathPointLat(p => p[0])
+  .pathPointLng(p => p[1])
+  .pathPointAlt(0.008)
+  .pathColor(() => '#ffffff')
+  // Unlike arcStroke (a globe-relative tube radius), pathStroke is a
+  // screen-space pixel width - the two aren't the same unit, so this isn't
+  // tuned to match arcStroke's value.
+  .pathStroke(1)
+  .pathTransitionDuration(0);
 
 // Groups fires within gridDeg of each other into a single marker, purely to
 // reduce visual clutter - the underlying detections are kept (in `.fires`)
@@ -362,8 +383,12 @@ function updateLabelsLayer() {
 
 // Plain white line from each predicted fire's original position to its
 // projected one - solid, no dash/animation (dashed arcs weren't rendering
-// visibly on this three-globe version, see ideas.txt history).
+// visibly on this three-globe version, see ideas.txt history). Strength 1
+// uses a single straight arc (predictionArcs); strength 2+ uses a bent,
+// hourly-stepped multi-point path instead (predictionPaths) - only one of
+// the two is populated at a time.
 let predictionArcs = [];
+let predictionPaths = [];
 
 let lastRenderedFires = [];
 let lastClusters = [];
@@ -547,6 +572,8 @@ const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
 const predictionDaysSlider = document.getElementById('predictionDaysSlider');
 const predictionDaysLabel = document.getElementById('predictionDaysLabel');
+const predictionStrengthSlider = document.getElementById('predictionStrengthSlider');
+const predictionStrengthLabel = document.getElementById('predictionStrengthLabel');
 const MAX_PREDICTIONS = 150; // safety cap for pathological cases; take the most intense first
 const WIND_GRID_DEG = 0.3; // wind is shared across markers within this grid cell (~30km) to limit API calls
 
@@ -554,9 +581,22 @@ function predictionHours() {
   return (+predictionDaysSlider.value) * 24;
 }
 
-// Tracks the most recent successful prediction run, so changing the day
-// slider can re-run it at the new range instead of just changing a number
-// nothing looks at.
+// How much goes into the spread model, from a quick current-wind snapshot
+// up to hourly wind + terrain + humidity. Each tier costs more requests, so
+// it's opt-in rather than always running at full strength.
+const PREDICTION_STRENGTH_LABELS = {
+  1: '1: Basic',
+  2: '2: Hourly wind',
+  3: '3: +Terrain',
+  4: '4: Max accuracy',
+};
+function predictionStrength() {
+  return +predictionStrengthSlider.value;
+}
+
+// Tracks the most recent successful prediction run, so changing the day/
+// strength slider can re-run it at the new setting instead of just changing
+// a number nothing looks at.
 let lastPredictedCountry = null;
 let lastPredictedFires = null;
 
@@ -565,6 +605,14 @@ predictionDaysSlider.addEventListener('input', () => {
   predictionDaysLabel.textContent = days === 1 ? '1 day' : `${days} days`;
 });
 predictionDaysSlider.addEventListener('change', () => {
+  if (predictionToggle.checked && lastPredictedCountry) {
+    runCountryPredictions(lastPredictedCountry, lastPredictedFires);
+  }
+});
+predictionStrengthSlider.addEventListener('input', () => {
+  predictionStrengthLabel.textContent = PREDICTION_STRENGTH_LABELS[predictionStrength()];
+});
+predictionStrengthSlider.addEventListener('change', () => {
   if (predictionToggle.checked && lastPredictedCountry) {
     runCountryPredictions(lastPredictedCountry, lastPredictedFires);
   }
@@ -690,18 +738,97 @@ function spreadDistanceKm(windSpeedKmh, frp, hours) {
   return (0.15 * windSpeedKmh + 0.3) * intensityFactor * (hours / 6);
 }
 
+// Circular-mean blend from bearing a toward bearing b by fraction w (0 =
+// pure a, 1 = pure b) - a plain weighted average breaks down near the
+// 0/360 wraparound, so this blends unit vectors instead.
+function blendBearing(aDeg, bDeg, w) {
+  const aRad = (aDeg * Math.PI) / 180;
+  const bRad = (bDeg * Math.PI) / 180;
+  const x = (1 - w) * Math.sin(aRad) + w * Math.sin(bRad);
+  const y = (1 - w) * Math.cos(aRad) + w * Math.cos(bRad);
+  return ((Math.atan2(x, y) * 180) / Math.PI + 360) % 360;
+}
+
+// FIRMS confidence ('l'/'n'/'h' for VIIRS) as a 0-1 trust weight - a "low"
+// confidence detection is more likely to be noise (sun glint, small
+// agricultural burn) than a sustained wildfire, so it shouldn't drive as
+// large a projected spread as a "high" confidence one.
+function confidenceWeight(fire) {
+  const conf = (fire.confidence || '').toString().toLowerCase();
+  if (conf === 'h' || conf === 'high') return 1.0;
+  if (conf === 'l' || conf === 'low') return 0.6;
+  return 0.85; // nominal, or a source that doesn't report confidence
+}
+
+// FRP-weighted average confidence across a cluster's raw detections, as a
+// single per-cluster multiplier on predicted spread distance.
+function clusterConfidenceFactor(cluster) {
+  if (!cluster.fires || cluster.fires.length === 0) return 1;
+  let weightedSum = 0;
+  let totalFrp = 0;
+  cluster.fires.forEach(f => {
+    const frp = f.frp || 1;
+    weightedSum += confidenceWeight(f) * frp;
+    totalFrp += frp;
+  });
+  return totalFrp > 0 ? weightedSum / totalFrp : 1;
+}
+
 function clearPredictions() {
   predictionArcs = [];
   world.arcsData(predictionArcs);
+  predictionPaths = [];
+  world.pathsData(predictionPaths);
   lastClusters.forEach(c => { c.faded = false; });
   world.pointsData(lastClusters);
   predictionPanel.style.display = 'none';
+}
+
+// Fetches elevation for `points` (grouped in fixed-size chunks of `perGroup`
+// points each, `groupsPerChunk` groups per request) sequentially, so a
+// single elevation request never exceeds Open-Meteo's ~100-point limit.
+// Failed chunks fall back to nulls (matched positionally) rather than
+// aborting the whole prediction.
+async function fetchElevationInChunks(points, perGroup, groupsPerChunk) {
+  const results = [];
+  const chunkSize = perGroup * groupsPerChunk;
+  for (let i = 0; i < points.length; i += chunkSize) {
+    const chunk = points.slice(i, i + chunkSize);
+    if (chunk.length === 0) continue;
+    const res = await fetch('/api/elevation/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(chunk),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      results.push(...json.results);
+    } else {
+      results.push(...chunk.map(() => null));
+    }
+  }
+  return results;
+}
+
+function makePredictedMarker(c, dest, hours, windSpeedKmh) {
+  return {
+    lat: dest.lat,
+    lng: dest.lng,
+    count: c.count,
+    totalFrp: c.totalFrp,
+    maxFrp: c.maxFrp,
+    fires: c.fires,
+    predicted: true,
+    predictionHours: hours,
+    windSpeedKmh,
+  };
 }
 
 async function runCountryPredictions(country, fires) {
   lastPredictedCountry = country;
   lastPredictedFires = fires;
   const hours = predictionHours();
+  const strength = predictionStrength();
 
   clearPredictions();
   predictionPanel.style.display = 'block';
@@ -732,59 +859,224 @@ async function runCountryPredictions(country, fires) {
     const key = cellOf(c);
     if (!cellCenters.has(key)) cellCenters.set(key, c);
   });
-
-  const windByCell = new Map();
   const cellEntries = [...cellCenters.entries()];
-  if (cellEntries.length > 0) {
-    const res = await fetch('/api/wind/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cellEntries.map(([, c]) => ({ lat: c.lat, lng: c.lng }))),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      json.results.forEach((wind, i) => windByCell.set(cellEntries[i][0], wind));
-    }
-  }
 
   const predictedMarkers = [];
   const newArcs = [];
+  const newPaths = [];
 
-  targets.forEach(c => {
-    const wind = windByCell.get(cellOf(c));
-    if (!wind) return;
-    const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, hours);
-    const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
+  if (strength === 1) {
+    // Stage 1: one current-conditions wind snapshot, straight projection -
+    // the original model.
+    const windByCell = new Map();
+    if (cellEntries.length > 0) {
+      const res = await fetch('/api/wind/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cellEntries.map(([, c]) => ({ lat: c.lat, lng: c.lng }))),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        json.results.forEach((wind, i) => windByCell.set(cellEntries[i][0], wind));
+      }
+    }
 
-    c.faded = true; // dim the fire's current position in place
+    targets.forEach(c => {
+      const wind = windByCell.get(cellOf(c));
+      if (!wind) return;
+      const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, hours);
+      const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
 
-    predictedMarkers.push({
-      lat: dest.lat,
-      lng: dest.lng,
-      count: c.count,
-      totalFrp: c.totalFrp,
-      maxFrp: c.maxFrp,
-      fires: c.fires,
-      predicted: true,
-      predictionHours: hours,
-      windSpeedKmh: wind.wind_speed_kmh,
+      c.faded = true; // dim the fire's current position in place
+      predictedMarkers.push(makePredictedMarker(c, dest, hours, wind.wind_speed_kmh));
+      newArcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng });
     });
-    // Straight line from the original marker to the predicted one.
-    newArcs.push({
-      startLat: c.lat,
-      startLng: c.lng,
-      endLat: dest.lat,
-      endLng: dest.lng,
+
+    world.arcsData(newArcs);
+    predictionArcs = newArcs;
+  } else {
+    // Stage 2+: hourly wind forecast instead of one static snapshot, stepped
+    // every 6 hours so the path bends as the wind shifts over the window.
+    const forecastByCell = new Map();
+    if (cellEntries.length > 0) {
+      const res = await fetch('/api/wind/forecast/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points: cellEntries.map(([, c]) => ({ lat: c.lat, lng: c.lng })), hours }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        json.results.forEach((f, i) => forecastByCell.set(cellEntries[i][0], f.steps));
+      }
+    }
+
+    // Stage 3: one elevation-based slope multiplier per WIND CELL (not per
+    // marker - same coarse grid as the wind lookup), from a probe point 10km
+    // along the FIRST step's wind direction - cheap (one extra point per
+    // cell), but that also means it goes a bit stale over a multi-day
+    // window if the wind rotates. Stage 4 replaces this with a proper
+    // gradient (see below) that doesn't have that problem; this cheaper
+    // version stays as the "moderate" tier.
+    const slopeFactorByCell = new Map();
+    if (strength === 3) {
+      const probePoints = [];
+      const probeCellKeys = [];
+      cellEntries.forEach(([key, c]) => {
+        const steps = forecastByCell.get(key);
+        if (!steps || steps.length === 0) return;
+        const probe = destinationPoint(c.lat, c.lng, steps[0].wind_blowing_toward_deg, 10);
+        probePoints.push({ lat: c.lat, lng: c.lng }, { lat: probe.lat, lng: probe.lng });
+        probeCellKeys.push(key);
+      });
+      // Open-Meteo's elevation endpoint 400s past ~100 points in one request,
+      // and a country with many spread-out fire clusters easily has more
+      // cells than that (each cell contributes 2 points) - so this goes out
+      // in chunks of 40 pairs (80 points) rather than one big request.
+      const ELEVATION_CHUNK_CELLS = 40;
+      const elevationResults = await fetchElevationInChunks(probePoints, 2, ELEVATION_CHUNK_CELLS);
+      probeCellKeys.forEach((key, i) => {
+        const origin = elevationResults[i * 2];
+        const probe = elevationResults[i * 2 + 1];
+        if (!origin || !probe) return;
+        // Percent grade over the 10km probe distance; +3% spread speed per
+        // 1% upslope grade, clamped so a cliff doesn't produce a silly
+        // multiplier - fire spreads faster uphill (preheats fuel above it)
+        // and slower downhill, which is the one piece of real fire behavior
+        // this heuristic tries to capture.
+        const gradePct = ((probe.elevation_m - origin.elevation_m) / 10000) * 100;
+        slopeFactorByCell.set(key, Math.min(1.8, Math.max(0.5, 1 + gradePct * 0.03)));
+      });
+    }
+
+    // Stage 4 ("most accurate"): every signal we already pull that's
+    // actually worth using, per wind cell / per cluster so it stays cheap
+    // even though it's the most thorough tier:
+    //  - a true 2D elevation gradient (5 probes: origin + N/E/S/W at 10km)
+    //    instead of stage 3's single wind-aligned probe, so slope keeps
+    //    making sense at hour 150 even after the wind has rotated away from
+    //    its hour-0 direction, and can also nudge the travel BEARING toward
+    //    true upslope, not just scale distance
+    //  - precipitation, which realistically suppresses spread far more than
+    //    humidity alone
+    //  - temperature, combined with humidity (hot+dry spreads faster than
+    //    either factor alone implies)
+    //  - FIRMS detection confidence, so a cluster built from shaky/low-
+    //    confidence detections doesn't project as aggressively as one built
+    //    from confirmed high-confidence fire pixels
+    const gradientByCell = new Map();
+    if (strength >= 4) {
+      const probePoints = [];
+      const probeCellKeys = [];
+      cellEntries.forEach(([key, c]) => {
+        const steps = forecastByCell.get(key);
+        if (!steps || steps.length === 0) return;
+        const north = destinationPoint(c.lat, c.lng, 0, 10);
+        const east = destinationPoint(c.lat, c.lng, 90, 10);
+        const south = destinationPoint(c.lat, c.lng, 180, 10);
+        const west = destinationPoint(c.lat, c.lng, 270, 10);
+        probePoints.push(
+          { lat: c.lat, lng: c.lng },
+          { lat: north.lat, lng: north.lng },
+          { lat: east.lat, lng: east.lng },
+          { lat: south.lat, lng: south.lng },
+          { lat: west.lat, lng: west.lng },
+        );
+        probeCellKeys.push(key);
+      });
+      // 5 points/cell instead of stage 3's 2, so the chunk size drops to
+      // keep each request around the same ~80-point budget.
+      const ELEVATION_CHUNK_CELLS = 16;
+      const elevationResults = await fetchElevationInChunks(probePoints, 5, ELEVATION_CHUNK_CELLS);
+      probeCellKeys.forEach((key, i) => {
+        const base = i * 5;
+        const [origin, north, east, south, west] = elevationResults.slice(base, base + 5);
+        if (!origin || !north || !east || !south || !west) return;
+        // Central-difference gradient: meters of rise per km, in the north
+        // and east directions separately, over the 20km north-south /
+        // east-west span between probes.
+        const gradNorth = (north.elevation_m - south.elevation_m) / 20;
+        const gradEast = (east.elevation_m - west.elevation_m) / 20;
+        gradientByCell.set(key, { gradNorth, gradEast });
+      });
+    }
+
+    targets.forEach(c => {
+      const steps = forecastByCell.get(cellOf(c));
+      if (!steps || steps.length === 0) return;
+      const cellKey = cellOf(c);
+      const flatSlopeFactor = strength === 3 ? (slopeFactorByCell.get(cellKey) ?? 1) : 1;
+      const gradient = strength >= 4 ? gradientByCell.get(cellKey) : null;
+      const confidenceFactor = strength >= 4 ? clusterConfidenceFactor(c) : 1;
+
+      let lat = c.lat;
+      let lng = c.lng;
+      let lastWindSpeed = steps[0].wind_speed_kmh;
+      const points = [[lat, lng]];
+
+      steps.forEach((step, i) => {
+        const nextHour = i + 1 < steps.length ? steps[i + 1].hours_from_now : hours;
+        const stepHours = Math.min(nextHour, hours) - step.hours_from_now;
+        if (stepHours <= 0) return;
+
+        let travelBearing = step.wind_blowing_toward_deg;
+        let slopeFactor = flatSlopeFactor;
+
+        if (gradient) {
+          // Project the gradient onto THIS step's actual wind bearing
+          // (unlike stage 3's one-shot probe, this stays correct as wind
+          // rotates hour to hour) to get % grade in the direction of travel.
+          const windRad = (travelBearing * Math.PI) / 180;
+          const gradAlongWind = gradient.gradNorth * Math.cos(windRad) + gradient.gradEast * Math.sin(windRad);
+          const gradePct = gradAlongWind / 10; // m rise per km -> % grade
+          slopeFactor = Math.min(1.8, Math.max(0.5, 1 + gradePct * 0.03));
+
+          // Bend the travel direction slightly toward true upslope - capped
+          // so wind still dominates overall, this is a nudge not a
+          // replacement for wind-driven spread.
+          const steepness = Math.hypot(gradient.gradNorth, gradient.gradEast); // m per km
+          const upslopeBearing = ((Math.atan2(gradient.gradEast, gradient.gradNorth) * 180) / Math.PI + 360) % 360;
+          const blendWeight = Math.min(0.35, steepness * 0.004);
+          travelBearing = blendBearing(travelBearing, upslopeBearing, blendWeight);
+        }
+
+        // Stage 4: humidity + temperature (combined the way real fire-
+        // weather indices do - hot+dry spreads faster than either implies
+        // alone) and precipitation, which realistically suppresses spread
+        // far more than humidity by itself.
+        const humidityFactor = strength >= 4
+          ? Math.min(1.3, Math.max(0.5, 1.4 - step.humidity_pct / 100))
+          : 1;
+        const temperatureFactor = strength >= 4
+          ? Math.min(1.3, Math.max(0.7, 0.85 + (step.temperature_c - 20) * 0.015))
+          : 1;
+        const precipFactor = strength >= 4
+          ? Math.min(1, Math.max(0.15, 1 - step.precipitation_mm * 0.5))
+          : 1;
+
+        const distanceKm = spreadDistanceKm(step.wind_speed_kmh, c.totalFrp, stepHours)
+          * slopeFactor * humidityFactor * temperatureFactor * precipFactor * confidenceFactor;
+        const dest = destinationPoint(lat, lng, travelBearing, distanceKm);
+        lat = dest.lat;
+        lng = dest.lng;
+        lastWindSpeed = step.wind_speed_kmh;
+        points.push([lat, lng]);
+      });
+
+      c.faded = true; // dim the fire's current position in place
+      predictedMarkers.push(makePredictedMarker(c, { lat, lng }, hours, lastWindSpeed));
+      newPaths.push({ points });
     });
-  });
+
+    world.pathsData(newPaths);
+    predictionPaths = newPaths;
+  }
 
   world.pointsData([...lastClusters, ...predictedMarkers]);
-  predictionArcs = newArcs;
-  world.arcsData(predictionArcs);
 
+  const projectedCount = strength === 1 ? newArcs.length : newPaths.length;
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
-    <p>Projected ${hours}hr position for ${newArcs.length} of ${targets.length} marker(s)</p>
+    <p>Projected ${hours}hr position for ${projectedCount} of ${targets.length} marker(s)</p>
   `;
 }
 
