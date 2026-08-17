@@ -151,7 +151,7 @@
   <div id="predictionInfo"></div>
   <button id="clearPredictions">Clear</button>
 </div>
-<button id="windToggleBtn" title="Toggle wind direction overlay">🧭</button>
+<button id="windToggleBtn" title="Toggle wind direction overlay">💨</button>
 <div id="globeViz"></div>
 
 <script src="https://unpkg.com/globe.gl"></script>
@@ -295,29 +295,23 @@ const world = Globe()
   .polygonStrokeColor(() => '#000000')
   .polygonAltitude(0.005)
   .polygonLabel(d => d.properties?.name ?? '')
-  .labelsData([])
-  .labelLat(d => d.lat)
-  .labelLng(d => d.lng)
-  .labelText(d => d.text)
-  .labelRotation(d => d.rot)
-  .labelLabel(d => d.tooltip ?? '')
-  .labelSize(d => d.size)
-  .labelColor(d => d.color)
-  .labelDotRadius(0)
-  .labelIncludeDot(false)
-  .labelResolution(3)
-  .labelAltitude(0.006)
-  .labelsTransitionDuration(0)
   .arcsData([])
   .arcStartLat(d => d.startLat)
   .arcStartLng(d => d.startLng)
   .arcEndLat(d => d.endLat)
   .arcEndLng(d => d.endLng)
-  .arcColor(() => '#ffffff')
+  .arcColor(d => d.color)
   .arcStroke(0.075)
   .arcAltitude(0.008) // fixed, not auto-scaled - these spread distances are short
   // enough (tens to low-hundreds of km) that auto altitude flattened arcs
   // right onto the surface and they z-fought with the globe texture
+  // Prediction arcs stay solid (dashLength 1 + gap 0 = no visible dash,
+  // matching the old always-solid behavior); only the wind flow overlay
+  // animates - a moving dash reads as "flowing toward" far better than a
+  // static rotated arrow glyph did.
+  .arcDashLength(d => (d.animated ? 0.4 : 1))
+  .arcDashGap(d => (d.animated ? 0.3 : 0))
+  .arcDashAnimateTime(d => (d.animated ? 4000 : 0))
   .arcsTransitionDuration(0)
   // Multi-point trajectory for prediction strength 2+ (hourly-stepped path,
   // bending as the wind shifts), as opposed to the single straight arc
@@ -332,7 +326,23 @@ const world = Globe()
   // screen-space pixel width - the two aren't the same unit, so this isn't
   // tuned to match arcStroke's value.
   .pathStroke(1)
-  .pathTransitionDuration(0);
+  .pathTransitionDuration(0)
+  // Country name labels only - a handful of TextGeometry objects (capped,
+  // see updateCountryLabels), nothing like the per-fire "!" labels that
+  // caused the old zoom-in lag (those rebuilt hundreds of glyphs on every
+  // zoom-tier change; this rebuilds at most COUNTRY_LABEL_CAP of them, and
+  // only when the visible set actually changes).
+  .labelsData([])
+  .labelLat(d => d.lat)
+  .labelLng(d => d.lng)
+  .labelText(d => d.name)
+  .labelColor(() => '#ffffff')
+  .labelSize(d => d.size)
+  .labelDotRadius(0)
+  .labelIncludeDot(false)
+  .labelResolution(2)
+  .labelAltitude(0.005)
+  .labelsTransitionDuration(0);
 
 // Groups fires within gridDeg of each other into a single marker, purely to
 // reduce visual clutter - the underlying detections are kept (in `.fires`)
@@ -369,16 +379,14 @@ function clusterFires(fires, gridDeg) {
   });
 }
 
-// The labels layer holds the wind direction overlay (toggled independently
-// via the compass button). Fire markers used to also add a "!" text label
-// per cluster, but each glyph is a real 3D TextGeometry, not a cheap point
-// sprite - in a dense fire complex that meant hundreds of text geometries
-// being (re)built at once, which was the actual cause of the zoom-in lag.
-// This layer stays small (one glyph per grid cell, not per raw fire) so it
-// doesn't reintroduce that cost.
-let windOverlayArrows = [];
-function updateLabelsLayer() {
-  world.labelsData(windOverlayArrows);
+// The arcs layer is shared between two independent things - fire spread
+// predictions (white, solid) and the worldwide wind flow overlay (blue,
+// animated) - so they're combined here rather than each caller managing
+// world.arcsData() directly and clobbering the other's arcs.
+let predictionArcs = [];
+let windFlowArcs = [];
+function updateArcsLayer() {
+  world.arcsData([...predictionArcs, ...windFlowArcs]);
 }
 
 // Plain white line from each predicted fire's original position to its
@@ -387,7 +395,6 @@ function updateLabelsLayer() {
 // uses a single straight arc (predictionArcs); strength 2+ uses a bent,
 // hourly-stepped multi-point path instead (predictionPaths) - only one of
 // the two is populated at a time.
-let predictionArcs = [];
 let predictionPaths = [];
 
 let lastRenderedFires = [];
@@ -416,6 +423,8 @@ function renderFireMarkers(fires, altitudeOverride) {
 // re-run against the fresh clusters instead of just dropped.
 let currentZoomTier = null;
 world.controls().addEventListener('change', () => {
+  updateCountryLabels(world.pointOfView().altitude);
+
   if (lastRenderedFires.length === 0) return;
   const tier = gridForAltitude(world.pointOfView().altitude);
   if (tier === currentZoomTier) return;
@@ -529,8 +538,64 @@ async function loadCountryBorders() {
       geometry: f.geometry,
     };
   });
+  updateCountryLabels(world.pointOfView().altitude);
 }
 loadCountryBorders();
+
+// A country's name appears once the camera is within LABEL_VISIBILITY_FACTOR
+// times its own "natural framing altitude" (the same c.altitude used to fly
+// to it on search) - large countries (large latSpan/lngSpan -> large
+// altitude) qualify from far away, small ones only once zoomed in close.
+// That's a cheap stand-in for "does it actually fit on screen" without real
+// text measurement. That check alone isn't enough though: it only looks at
+// zoom level, not WHERE the camera is pointed, so zooming in tight on one
+// small country still left it competing for the label cap against every
+// other small country on Earth that also technically "qualifies" at that
+// zoom level. So this also filters to countries within roughly the current
+// viewport, using the camera's look-at point. Gated on a coarse altitude +
+// look-at bucket so it only rebuilds the label set on a meaningful camera
+// change, not every frame of a drag.
+const LABEL_VISIBILITY_FACTOR = 2.2;
+const COUNTRY_LABEL_CAP = 60; // safety cap; keeps the largest/most prominent nearby countries if more would qualify
+let lastLabelKey = null;
+
+function updateCountryLabels(altitude) {
+  const pov = world.pointOfView();
+  const key = `${Math.round(altitude * 20)}|${Math.round(pov.lat / 2)}|${Math.round(pov.lng / 2)}`;
+  if (key === lastLabelKey) return;
+  lastLabelKey = key;
+
+  // Rough angular radius of what's currently on screen - shrinks with
+  // altitude, same way the actual visible slice of globe does. A plain
+  // degrees-of-lat/lng distance (not true great-circle) is plenty precise
+  // for "is this roughly in view," and a country's own size is added as
+  // slack so a large country's label doesn't vanish just because its
+  // centroid sits slightly outside the strict radius while the country
+  // itself still spans into view.
+  const visibleRadiusDeg = clamp(altitude * 90, 6, 180);
+
+  const visible = COUNTRY_LIST
+    .filter(c => altitude <= c.altitude * LABEL_VISIBILITY_FACTOR)
+    .filter(c => {
+      const dLat = pov.lat - c.lat;
+      const dLng = pov.lng - c.lng;
+      return Math.sqrt(dLat * dLat + dLng * dLng) <= visibleRadiusDeg + c.altitude * 60;
+    })
+    .sort((a, b) => b.altitude - a.altitude)
+    .slice(0, COUNTRY_LABEL_CAP)
+    .map(c => ({
+      lat: c.lat,
+      lng: c.lng,
+      name: c.name,
+      // Labels are 3D billboards anchored to the globe surface, so getting
+      // closer already makes them look bigger on screen via perspective -
+      // this needs to shrink WITH altitude (not against it) or a label
+      // balloons to fill the screen once zoomed into a small country.
+      size: clamp(altitude * 0.9, 0.18, 1.0),
+    }));
+
+  world.labelsData(visible);
+}
 
 function renderCountryResults(query) {
   countryResults.innerHTML = '';
@@ -661,17 +726,13 @@ async function loadCountryFires(country) {
 
 // Label glyphs point "south" (down-screen) at rotation 0, rotating clockwise
 // from there - empirically verified against the compass, not a documented API.
-function bearingToLabelRotation(bearingDeg) {
-  return (180 - bearingDeg + 360) % 360;
-}
-
-// --- Wind direction overlay (toggled via the compass button, independent of predictions) ---
+// --- Wind direction overlay (toggled via the wind button, independent of predictions) ---
 const windToggleBtn = document.getElementById('windToggleBtn');
 let windOverlayOn = false;
 
 // A coarse worldwide sample grid, not one arrow per fire - keeps this to a
 // couple hundred wind lookups (one batched request) and a couple hundred
-// cheap arrow labels regardless of how many fires are loaded.
+// cheap animated arcs regardless of how many fires are loaded.
 function buildWindSampleGrid() {
   const points = [];
   for (let lat = -60; lat <= 60; lat += 30) {
@@ -682,6 +743,8 @@ function buildWindSampleGrid() {
   return points;
 }
 
+const WIND_ARC_LENGTH_KM = 600; // long enough to read as a "streak" without a whole grid cell
+
 async function loadWindOverlay() {
   const points = buildWindSampleGrid();
   const res = await fetch('/api/wind/batch', {
@@ -691,16 +754,18 @@ async function loadWindOverlay() {
   });
   if (!res.ok) return;
   const json = await res.json();
-  windOverlayArrows = json.results.map(wind => ({
-    lat: wind.lat,
-    lng: wind.lng,
-    text: '^',
-    rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
-    color: '#66ccff',
-    size: 0.4,
-    tooltip: `Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
-  }));
-  updateLabelsLayer();
+  windFlowArcs = json.results.map(wind => {
+    const end = destinationPoint(wind.lat, wind.lng, wind.wind_blowing_toward_deg, WIND_ARC_LENGTH_KM);
+    return {
+      startLat: wind.lat,
+      startLng: wind.lng,
+      endLat: end.lat,
+      endLng: end.lng,
+      color: '#66ccff',
+      animated: true,
+    };
+  });
+  updateArcsLayer();
 }
 
 windToggleBtn.addEventListener('click', async () => {
@@ -709,8 +774,8 @@ windToggleBtn.addEventListener('click', async () => {
   if (windOverlayOn) {
     await loadWindOverlay();
   } else {
-    windOverlayArrows = [];
-    updateLabelsLayer();
+    windFlowArcs = [];
+    updateArcsLayer();
   }
 });
 
@@ -776,7 +841,7 @@ function clusterConfidenceFactor(cluster) {
 
 function clearPredictions() {
   predictionArcs = [];
-  world.arcsData(predictionArcs);
+  updateArcsLayer();
   predictionPaths = [];
   world.pathsData(predictionPaths);
   lastClusters.forEach(c => { c.faded = false; });
@@ -889,11 +954,11 @@ async function runCountryPredictions(country, fires) {
 
       c.faded = true; // dim the fire's current position in place
       predictedMarkers.push(makePredictedMarker(c, dest, hours, wind.wind_speed_kmh));
-      newArcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng });
+      newArcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng, color: '#ffffff', animated: false });
     });
 
-    world.arcsData(newArcs);
     predictionArcs = newArcs;
+    updateArcsLayer();
   } else {
     // Stage 2+: hourly wind forecast instead of one static snapshot, stepped
     // every 6 hours so the path bends as the wind shifts over the window.

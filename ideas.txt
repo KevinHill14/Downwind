@@ -1,13 +1,6 @@
 Ideas / deferred features (mentioned but not built yet)
 =========================================================
 
-- Country name labels
-  - White font by default
-  - Smart/zoom-dependent: only show a country's name once it actually fits
-    on screen at the current zoom (don't just always render every label -
-    that's what caused the earlier lag with the "!" markers, since each
-    label is a real 3D TextGeometry, not a cheap point sprite)
-
 - Ocean names (same label system as country names, once that's designed)
 
 - Compass showing orientation relative to the rest of the world
