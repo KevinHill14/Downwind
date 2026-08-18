@@ -374,22 +374,23 @@ let lastViewportKey = null;
 // rendering - world.pointsData() rebuilds the WebGL geometry buffer for
 // every marker on screen, and during a continuous zoom the shrinking
 // viewport box crosses a new bucket on nearly every 250ms poll tick, so
-// that full rebuild was firing repeatedly THROUGHOUT the zoom gesture
-// instead of once at the end - visible jank on every scroll, not a single
-// one-time cost. These two track "what area is the camera looking at right
-// now" separately from "what area have we actually rendered," so a render
-// only happens once that candidate area has held steady across a poll
-// tick (camera has actually stopped, not just paused mid-motion).
-let candidateViewportKey = null;
-let candidateViewportSeenAt = 0;
-const VIEWPORT_SETTLE_MS = 300;
+// that full rebuild was firing repeatedly THROUGHOUT the zoom gesture -
+// visible jank on every scroll. Throttled (not debounced): waiting for the
+// camera to fully stop before rendering anything looks worse, not better -
+// the markers would just sit frozen (wrong for wherever you'd zoomed to)
+// for the whole gesture and then suddenly snap at the end. Throttling
+// instead renders periodically WHILE you're still moving, so it keeps
+// visibly catching up, and it naturally lands on the correct final view
+// within one throttle window of stopping (the next poll tick after that
+// window sees the settled key and renders it).
+let lastViewportRenderAt = 0;
+const VIEWPORT_RENDER_THROTTLE_MS = 400;
 
 async function maybeUpdateViewportFires() {
   if (inCountryView) return;
   const pov = world.pointOfView();
 
   if (pov.altitude >= VIEWPORT_MODE_ALTITUDE) {
-    candidateViewportKey = null;
     if (inViewportDetailMode) {
       // Zoomed back out past the threshold - restore the world overview
       // instead of leaving a small region's fires rendered alone on a wide
@@ -420,17 +421,10 @@ async function maybeUpdateViewportFires() {
   const gridDeg = gridForAltitude(pov.altitude);
   const key = `${gridDeg},${Math.round(west / 2)},${Math.round(south / 2)},${Math.round(east / 2)},${Math.round(north / 2)}`;
 
-  if (key !== candidateViewportKey) {
-    // The camera moved to a genuinely different area/tier since the last
-    // poll tick - note it, but don't render yet. If the user is mid-scroll
-    // this will keep changing every tick and never reach the settle check
-    // below, which is exactly the point.
-    candidateViewportKey = key;
-    candidateViewportSeenAt = performance.now();
-    return;
-  }
-  if (performance.now() - candidateViewportSeenAt < VIEWPORT_SETTLE_MS) return;
-  if (key === lastViewportKey) return; // already rendered this exact view
+  if (key === lastViewportKey) return; // nothing new to show
+  const now = performance.now();
+  if (now - lastViewportRenderAt < VIEWPORT_RENDER_THROTTLE_MS) return; // rendered too recently - catch up next tick
+  lastViewportRenderAt = now;
   lastViewportKey = key;
   inViewportDetailMode = true;
 
