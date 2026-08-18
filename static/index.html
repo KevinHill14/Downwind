@@ -268,7 +268,13 @@ function gridForAltitude(altitude) {
   if (altitude > 1.2) return 2.0; // whole-earth view - a handful of regional blobs
   if (altitude > 0.6) return 0.5;
   if (altitude > 0.2) return 0.15;
-  return 0.05; // zoomed into a country - full detail (~5.5km)
+  if (altitude > 0.05) return 0.05; // country-scale - ~5.5km, used to be the finest tier
+  // Below country-scale (viewport loading can zoom in much closer than a
+  // country view ever did) clustering keeps getting finer instead of
+  // plateauing at 5.5km, so zooming in keeps revealing more individual
+  // fires rather than hitting an invisible ceiling.
+  if (altitude > 0.015) return 0.015; // ~1.7km
+  return 0.003; // ~330m - close to VIIRS' own ~375m pixel size, i.e. near-individual detections
 }
 
 function clusterFires(fires, gridDeg) {
@@ -316,10 +322,7 @@ function renderFireMarkers(fires, altitudeOverride) {
   // that know the real target altitude (e.g. a just-searched country) pass
   // it explicitly instead of relying on a live camera read.
   const altitude = altitudeOverride ?? world.pointOfView().altitude;
-  // A viewport-loaded set is already bounded to a small on-screen area (not
-  // the whole world), so it doesn't need the coarse world-scale clustering
-  // tiers - always cluster it at near-full detail.
-  const gridDeg = inViewportDetailMode ? 0.05 : gridForAltitude(altitude);
+  const gridDeg = gridForAltitude(altitude);
   currentZoomTier = gridDeg;
   lastClusters = clusterFires(fires, gridDeg);
   world.pointsData(lastClusters);
@@ -394,9 +397,17 @@ async function maybeUpdateViewportFires() {
   const south = clamp(pov.lat - radius, -90, 90);
   const north = clamp(pov.lat + radius, -90, 90);
 
+  // Same zoom-tier grid the world/country views use (gridForAltitude) -
+  // coarser clustering zoomed out, finer (down to near-individual fires)
+  // zoomed in, instead of a single fixed grid regardless of how close the
+  // camera actually is.
+  const gridDeg = gridForAltitude(pov.altitude);
+
   // Bucketed so panning slightly doesn't refetch constantly - only once the
-  // visible area has actually shifted by a couple of degrees.
-  const key = `${Math.round(west / 2)},${Math.round(south / 2)},${Math.round(east / 2)},${Math.round(north / 2)}`;
+  // visible area has actually shifted by a couple of degrees, OR the zoom
+  // tier itself changed (that needs a fresh fetch even over the same area,
+  // since the server-side clustering grid is different).
+  const key = `${gridDeg},${Math.round(west / 2)},${Math.round(south / 2)},${Math.round(east / 2)},${Math.round(north / 2)}`;
   if (key === lastViewportKey) return;
   lastViewportKey = key;
   inViewportDetailMode = true;
@@ -408,13 +419,13 @@ async function maybeUpdateViewportFires() {
   // are competing for the same cap, so "capped to the N most intense"
   // silently drops exactly the regional detections this mode exists to
   // surface. Every fire in the visible area is shown - the backend
-  // aggregates them into the same grid this mode always renders at anyway
-  // (see renderPreClusteredMarkers), so a dense area comes back as at most
-  // a few thousand cluster points instead of tens of thousands of raw
-  // ones, without actually leaving any fire out of those totals.
+  // aggregates them into the same grid this mode renders at anyway (see
+  // renderPreClusteredMarkers), so a dense area comes back as far fewer
+  // cluster points instead of every raw detection, without actually
+  // leaving any fire out of those totals.
   const bbox = [west, south, east, north].join(',');
   try {
-    const res = await fetch(`/api/fires?bbox=${encodeURIComponent(bbox)}&grid=0.05`);
+    const res = await fetch(`/api/fires?bbox=${encodeURIComponent(bbox)}&grid=${gridDeg}`);
     const json = await res.json();
     if (!res.ok) return;
     // The camera may have moved on to a different area, or a country search
