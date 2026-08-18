@@ -317,15 +317,89 @@ function renderFireMarkers(fires, altitudeOverride) {
 // the old faded/predicted state, so if a prediction was showing, it's
 // re-run against the fresh clusters instead of just dropped.
 let currentZoomTier = null;
+
+// Whether a country search is the active view - viewport-loading (below)
+// stays out of the way while one is, since loadCountryFires already fetched
+// that country's complete fire set up front.
+let inCountryView = false;
+
+// Zoomed-out (whole earth) view stays on the fast capped/cached overview -
+// fetching every fire on the planet at full detail just to show 2500 of
+// them would be slow for no visual benefit. But zoomed in past this
+// altitude, "just show me what's visible" becomes a small enough area that
+// fetching it at FULL detail (uncapped, no uniform-worldwide compromise) is
+// both fast and actually gets every fire in that region - the same
+// per-region completeness a country search already gets, without requiring
+// the user to search a country first. This is also the fix for fires that
+// exist but weren't intense enough to make the worldwide top-N cut.
+const VIEWPORT_MODE_ALTITUDE = 1.0;
+let inViewportDetailMode = false;
+let lastViewportKey = null;
+
+async function maybeUpdateViewportFires() {
+  if (inCountryView) return;
+  const pov = world.pointOfView();
+
+  if (pov.altitude >= VIEWPORT_MODE_ALTITUDE) {
+    if (inViewportDetailMode) {
+      // Zoomed back out past the threshold - restore the world overview
+      // instead of leaving a small region's fires rendered alone on a wide
+      // view.
+      inViewportDetailMode = false;
+      lastViewportKey = null;
+      renderFireMarkers(ALL_FIRES);
+      statusEl.textContent = FIRE_COUNT_STEPS[+fireCountSlider.value]
+        ? `${ALL_FIRES.length} highest-intensity fire detections worldwide (search a country for full detail)`
+        : `${ALL_FIRES.length} active fire detections worldwide`;
+    }
+    return;
+  }
+
+  // Half-width of the fetch bbox in degrees - smaller than the label/wind
+  // viewport radius since this is "what's actually on screen to fetch in
+  // full," not a generous margin.
+  const radius = clamp(pov.altitude * 40, 3, 40);
+  const west = clamp(pov.lng - radius, -180, 180);
+  const east = clamp(pov.lng + radius, -180, 180);
+  const south = clamp(pov.lat - radius, -90, 90);
+  const north = clamp(pov.lat + radius, -90, 90);
+
+  // Bucketed so panning slightly doesn't refetch constantly - only once the
+  // visible area has actually shifted by a couple of degrees.
+  const key = `${Math.round(west / 2)},${Math.round(south / 2)},${Math.round(east / 2)},${Math.round(north / 2)}`;
+  if (key === lastViewportKey) return;
+  lastViewportKey = key;
+  inViewportDetailMode = true;
+
+  const bbox = [west, south, east, north].join(',');
+  try {
+    const res = await fetch('/api/fires?bbox=' + encodeURIComponent(bbox));
+    const json = await res.json();
+    if (!res.ok) return;
+    // The camera may have moved on to a different area, or a country search
+    // may have started, while this was in flight - a stale response
+    // shouldn't overwrite whatever's actually current now.
+    if (inCountryView || lastViewportKey !== key) return;
+    renderFireMarkers(json.fires, pov.altitude);
+    statusEl.textContent = `${json.fires.length} active fire detection(s) in view`;
+  } catch (err) {
+    // Keep whatever was already showing rather than clearing it on a blip.
+  }
+}
+
 // Country labels are TextGeometry meshes (like the fire "!" labels used to
 // be) - rebuilding up to COUNTRY_LABEL_CAP of them is fine once, but the
 // 'change' event fires continuously while dragging the globe, and a plain
 // per-event call was doing that rebuild dozens of times a second mid-drag.
 // Debounced so it only recomputes once the camera actually settles.
 let labelUpdateTimer = null;
+let viewportFiresTimer = null;
 world.controls().addEventListener('change', () => {
   clearTimeout(labelUpdateTimer);
   labelUpdateTimer = setTimeout(() => updateCountryLabels(world.pointOfView().altitude), 150);
+
+  clearTimeout(viewportFiresTimer);
+  viewportFiresTimer = setTimeout(maybeUpdateViewportFires, 300);
 
   if (lastRenderedFires.length === 0) return;
   const tier = gridForAltitude(world.pointOfView().altitude);
@@ -598,6 +672,9 @@ countrySearch.addEventListener('input', () => {
     // staying stuck on whatever country was last searched.
     lastPredictedCountry = null;
     lastPredictedFires = null;
+    inCountryView = false;
+    inViewportDetailMode = false;
+    lastViewportKey = null;
     loadFires();
   }
 });
@@ -667,6 +744,9 @@ let ALL_FIRES = [];
 // wherever the globally most intense fires happened to be, not in the
 // searched country).
 async function loadCountryFires(country) {
+  inCountryView = true;
+  inViewportDetailMode = false;
+  lastViewportKey = null;
   statusEl.textContent = `Loading fires for ${country.name}...`;
   const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
   try {
