@@ -157,8 +157,13 @@ function fireTooltip(d) {
     const label = d.count > 1 ? `${d.count} fires, combined FRP ${d.totalFrp.toFixed(1)} MW` : `FRP: ${d.totalFrp.toFixed(1)} MW`;
     return `Projected ${d.predictionHours}hr position<br/>${label}<br/>Wind: ${d.windSpeedKmh.toFixed(1)} km/h`;
   }
-  if (d.count > 1) {
-    return `${d.count} fires clustered here<br/>Combined FRP: ${d.totalFrp.toFixed(1)} MW<br/>Most intense: ${d.maxFrp.toFixed(1)} MW`;
+  // Server-pre-clustered markers (the viewport-loading path) only carry
+  // the aggregate stats, not each raw detection - `d.fires` only exists
+  // for client-side-clustered data, so a single fire there still gets its
+  // own confidence/date/time, but a pre-clustered singleton (count === 1
+  // but no `.fires`) falls back to the same summary the count > 1 case uses.
+  if (d.count > 1 || !d.fires) {
+    return `${d.count} fire(s) here<br/>Combined FRP: ${d.totalFrp.toFixed(1)} MW<br/>Most intense: ${d.maxFrp.toFixed(1)} MW`;
   }
   const f = d.fires[0];
   return `FRP: ${f.frp} MW<br/>Confidence: ${f.confidence}<br/>${f.acq_date} ${f.acq_time}`;
@@ -320,6 +325,17 @@ function renderFireMarkers(fires, altitudeOverride) {
   world.pointsData(lastClusters);
 }
 
+// For fires the backend already aggregated (see maybeUpdateViewportFires'
+// `grid` param) - each item already has {lat,lng,count,totalFrp,maxFrp},
+// the exact shape clusterFires() would have produced, so there's no
+// client-side re-clustering step (skips both that compute cost and having
+// to ship every raw detection to the browser just to immediately fold them
+// back together).
+function renderPreClusteredMarkers(clusters) {
+  lastClusters = clusters;
+  world.pointsData(lastClusters);
+}
+
 // Re-cluster (not re-fetch) whenever the camera crosses into a different
 // zoom tier, so the marker count adapts to what's actually legible/fast at
 // the current view without hitting the network again. Zooming around no
@@ -385,17 +401,28 @@ async function maybeUpdateViewportFires() {
   lastViewportKey = key;
   inViewportDetailMode = true;
 
+  // No intensity cap here (unlike the world overview) - a global top-FRP
+  // cutoff sounds harmless but isn't: checked directly against real data,
+  // a weak-but-real Ontario fire can rank near dead last out of tens of
+  // thousands when a whole continent's worth of stronger fires elsewhere
+  // are competing for the same cap, so "capped to the N most intense"
+  // silently drops exactly the regional detections this mode exists to
+  // surface. Every fire in the visible area is shown - the backend
+  // aggregates them into the same grid this mode always renders at anyway
+  // (see renderPreClusteredMarkers), so a dense area comes back as at most
+  // a few thousand cluster points instead of tens of thousands of raw
+  // ones, without actually leaving any fire out of those totals.
   const bbox = [west, south, east, north].join(',');
   try {
-    const res = await fetch('/api/fires?bbox=' + encodeURIComponent(bbox));
+    const res = await fetch(`/api/fires?bbox=${encodeURIComponent(bbox)}&grid=0.05`);
     const json = await res.json();
     if (!res.ok) return;
     // The camera may have moved on to a different area, or a country search
     // may have started, while this was in flight - a stale response
     // shouldn't overwrite whatever's actually current now.
     if (inCountryView || lastViewportKey !== key) return;
-    renderFireMarkers(json.fires, pov.altitude);
-    statusEl.textContent = `${json.fires.length} active fire detection(s) in view`;
+    renderPreClusteredMarkers(json.fires);
+    statusEl.textContent = `${json.raw_count} active fire detection(s) in view`;
   } catch (err) {
     // Keep whatever was already showing rather than clearing it on a blip.
   }

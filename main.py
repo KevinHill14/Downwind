@@ -66,6 +66,10 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
     header = lines[0].split(",")
     idx = {name: i for i, name in enumerate(header)}
 
+    # brightness (bright_ti4) isn't kept - nothing on the frontend uses it
+    # (only lat/lng/frp/confidence/acq_date/acq_time do), and skipping it
+    # trims both the parse work and the JSON payload for large areas where
+    # tens of thousands of rows are in play.
     fires = []
     for line in lines[1:]:
         cols = line.split(",")
@@ -74,7 +78,6 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
                 {
                     "lat": float(cols[idx["latitude"]]),
                     "lng": float(cols[idx["longitude"]]),
-                    "brightness": float(cols[idx["bright_ti4"]]),
                     "confidence": cols[idx["confidence"]],
                     "frp": float(cols[idx["frp"]]),  # fire radiative power (MW), proxy for intensity
                     "acq_date": cols[idx["acq_date"]],
@@ -139,6 +142,29 @@ async def _on_startup():
         asyncio.create_task(_warm_world_cache_loop())
 
 
+def _cluster_fires(fires: list[dict], grid_deg: float) -> list[dict]:
+    """Groups fires within grid_deg of each other into one FRP-weighted
+    centroid marker - the same aggregation static/index.html's clusterFires()
+    does client-side, but run here so a dense area's response is a few
+    hundred/thousand aggregate points instead of tens of thousands of raw
+    ones. Every fire still contributes fully to its cell's totals - nothing
+    is dropped or deprioritized, unlike a top-N cap."""
+    groups: dict[tuple[int, int], list[dict]] = {}
+    for f in fires:
+        key = (round(f["lat"] / grid_deg), round(f["lng"] / grid_deg))
+        groups.setdefault(key, []).append(f)
+
+    clusters = []
+    for group in groups.values():
+        total_frp = sum(f["frp"] for f in group)
+        max_frp = max(f["frp"] for f in group)
+        weight = total_frp or len(group)
+        lat = sum(f["lat"] * (f["frp"] or 1) for f in group) / weight
+        lng = sum(f["lng"] * (f["frp"] or 1) for f in group) / weight
+        clusters.append({"lat": lat, "lng": lng, "count": len(group), "totalFrp": total_frp, "maxFrp": max_frp})
+    return clusters
+
+
 @app.get("/api/fires")
 async def get_fires(
     bbox: str | None = Query(
@@ -146,6 +172,9 @@ async def get_fires(
     ),
     limit: int | None = Query(
         None, description="return only the N highest-intensity (FRP) fires, for a fast initial world view"
+    ),
+    grid: float | None = Query(
+        None, description="pre-aggregate fires into grid_deg x grid_deg FRP-weighted clusters before returning"
     ),
 ):
     # FIRMS' API silently returns zero rows for the literal string "world" -
@@ -176,10 +205,16 @@ async def get_fires(
     # just to throw most of the results away.
     sources = FIRMS_SOURCES if (bbox is not None or limit is None) else FIRMS_SOURCES[:1]
     fires = await _get_area_fires(area, sources)
-    if limit is not None:
+    raw_count = len(fires)
+
+    if grid is not None:
+        # Aggregated, not truncated - every one of raw_count fires still
+        # contributes to a cluster below, just not as individual rows.
+        fires = _cluster_fires(fires, grid)
+    elif limit is not None:
         fires = sorted(fires, key=lambda f: f["frp"], reverse=True)[:limit]
 
-    return {"fires": fires, "count": len(fires)}
+    return {"fires": fires, "count": len(fires), "raw_count": raw_count}
 
 
 WIND_URL = "https://api.open-meteo.com/v1/forecast"
