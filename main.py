@@ -160,38 +160,69 @@ class WindPoint(BaseModel):
 
 @app.post("/api/wind/batch")
 async def get_wind_batch(points: list[WindPoint]):
-    """Wind for many locations at once, e.g. one per predicted fire cluster.
-    Open-Meteo supports comma-separated lat/lng lists natively, so this is
-    ONE outbound request regardless of point count - fetching wind for each
-    point with its own request (even in parallel) was the main bottleneck
-    when predicting for many markers at once."""
+    """Wind for many locations at once, e.g. one per predicted fire cluster
+    or one per cell of the worldwide wind overlay grid. Open-Meteo supports
+    comma-separated lat/lng lists natively, so this is a handful of outbound
+    requests (chunked - see WIND_BATCH_CHUNK_SIZE) rather than one per point,
+    which was the main bottleneck when predicting for many markers at once.
+    Also cached per-point like the forecast/elevation endpoints, since the
+    wind overlay re-requests the same worldwide grid every time it's toggled."""
     if not points:
         return {"results": []}
 
-    params = {
-        "latitude": ",".join(str(p.lat) for p in points),
-        "longitude": ",".join(str(p.lng) for p in points),
-        "current": "wind_speed_10m,wind_direction_10m",
-        "wind_speed_unit": "kmh",
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(WIND_URL, params=params)
-        resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict):  # Open-Meteo returns a plain object for a single point
-        data = [data]
+    now = time.time()
+    uncached_points = []
+    for p in points:
+        key = f"{_round_coord(p.lat)},{_round_coord(p.lng)}"
+        cached = _current_wind_cache.get(key)
+        if cached is None or (now - cached["fetched_at"]) >= FORECAST_CACHE_TTL_SECONDS:
+            uncached_points.append(p)
 
-    results = []
-    for point, entry in zip(points, data):
-        current = entry["current"]
-        results.append(
-            {
-                "lat": point.lat,
-                "lng": point.lng,
+    # Open-Meteo is a GET API - a long enough comma-separated point list hits
+    # the URL length limit (414), so uncached points go out in bounded chunks.
+    # One chunk hitting a transient error (e.g. Open-Meteo's rate limit)
+    # shouldn't blank out the whole overlay - that chunk's points are just
+    # skipped rather than failing the entire request.
+    WIND_BATCH_CHUNK_SIZE = 200
+    for i in range(0, len(uncached_points), WIND_BATCH_CHUNK_SIZE):
+        chunk = uncached_points[i : i + WIND_BATCH_CHUNK_SIZE]
+        params = {
+            "latitude": ",".join(str(p.lat) for p in chunk),
+            "longitude": ",".join(str(p.lng) for p in chunk),
+            "current": "wind_speed_10m,wind_direction_10m",
+            "wind_speed_unit": "kmh",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(WIND_URL, params=params)
+                resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPError:
+            continue
+        if isinstance(data, dict):  # Open-Meteo returns a plain object for a single point
+            data = [data]
+        for point, entry in zip(chunk, data):
+            current = entry["current"]
+            key = f"{_round_coord(point.lat)},{_round_coord(point.lng)}"
+            _current_wind_cache[key] = {
                 "wind_speed_kmh": current["wind_speed_10m"],
                 "wind_blowing_toward_deg": (current["wind_direction_10m"] + 180) % 360,
+                "fetched_at": now,
             }
-        )
+
+    results = []
+    for point in points:
+        key = f"{_round_coord(point.lat)},{_round_coord(point.lng)}"
+        cached = _current_wind_cache.get(key)
+        if cached is not None:
+            results.append(
+                {
+                    "lat": point.lat,
+                    "lng": point.lng,
+                    "wind_speed_kmh": cached["wind_speed_kmh"],
+                    "wind_blowing_toward_deg": cached["wind_blowing_toward_deg"],
+                }
+            )
     return {"results": results}
 
 
@@ -208,6 +239,7 @@ class ForecastRequest(BaseModel):
 # that on normal repeated use, not just on first load like the FIRMS cache.
 _forecast_cache: dict[str, dict] = {}  # "lat,lng,hours" -> {"steps": [...], "fetched_at": float}
 _elevation_cache: dict[str, dict] = {}  # "lat,lng" -> {"elevation_m": float, "fetched_at": float}
+_current_wind_cache: dict[str, dict] = {}  # "lat,lng" -> {"wind_speed_kmh", "wind_blowing_toward_deg", "fetched_at"}
 FORECAST_CACHE_TTL_SECONDS = 15 * 60  # matches the FIRMS cache TTL
 ELEVATION_CACHE_TTL_SECONDS = 24 * 60 * 60  # terrain doesn't change; cached long, not forever, in case of bad reads
 

@@ -510,6 +510,73 @@ function pointInCountryGeometry(lat, lng, geometry) {
   return false;
 }
 
+// Area-weighted centroid of a ring (standard polygon centroid formula, not
+// just an average of its vertices).
+function ringCentroid(ring) {
+  let area = 0, cx = 0, cy = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [x0, y0] = ring[i];
+    const [x1, y1] = ring[(i + 1) % ring.length];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  area *= 0.5;
+  if (Math.abs(area) < 1e-9) {
+    const n = ring.length;
+    const sum = ring.reduce((acc, [x, y]) => [acc[0] + x, acc[1] + y], [0, 0]);
+    return { lng: sum[0] / n, lat: sum[1] / n };
+  }
+  return { lng: cx / (6 * area), lat: cy / (6 * area) };
+}
+
+// Where to actually draw a country's name label. The bounding-box center
+// (used for camera flyTo) is wrong for this - it's the midpoint of the
+// country's extent, not a point inside its shape, so anything concave or
+// crescent-shaped (Norway, Chile, Vietnam, Croatia...) gets a label that
+// lands in the ocean or in a neighboring country. The polygon centroid is
+// usually inside the shape, but not always for the same reason - so this
+// falls back to scanning a grid across the main polygon's bounding box for
+// the point closest to that centroid that's actually inside the country.
+function labelPointFor(feature) {
+  const geom = feature.geometry;
+  const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+
+  let mainPolygon = polygons[0];
+  let bestArea = ringArea(polygons[0][0]);
+  for (let i = 1; i < polygons.length; i++) {
+    const a = ringArea(polygons[i][0]);
+    if (a > bestArea) { bestArea = a; mainPolygon = polygons[i]; }
+  }
+
+  const outerRing = mainPolygon[0];
+  const centroid = ringCentroid(outerRing);
+  if (pointInCountryGeometry(centroid.lat, centroid.lng, geom)) return centroid;
+
+  let minLng = 180, maxLng = -180, minLat = 90, maxLat = -90;
+  outerRing.forEach(([lng, lat]) => {
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  });
+
+  let best = null;
+  let bestDist = Infinity;
+  const STEPS = 20;
+  for (let i = 0; i <= STEPS; i++) {
+    for (let j = 0; j <= STEPS; j++) {
+      const lng = minLng + ((maxLng - minLng) * i) / STEPS;
+      const lat = minLat + ((maxLat - minLat) * j) / STEPS;
+      if (!pointInCountryGeometry(lat, lng, geom)) continue;
+      const d = (lng - centroid.lng) ** 2 + (lat - centroid.lat) ** 2;
+      if (d < bestDist) { bestDist = d; best = { lat, lng }; }
+    }
+  }
+  return best ?? { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
+}
+
 let COUNTRY_LIST = [];
 const countrySearch = document.getElementById('countrySearch');
 const countryResults = document.getElementById('countryResults');
@@ -526,10 +593,13 @@ async function loadCountryBorders() {
     // by the initial fetch - the precise polygon filter below still excludes
     // them from the final result if they're genuinely outside the country.
     const pad = 0.75;
+    const labelPoint = labelPointFor(f);
     return {
       name: f.properties.name,
       lat: b.lat,
       lng: b.lng,
+      labelLat: labelPoint.lat,
+      labelLng: labelPoint.lng,
       altitude: clamp(Math.max(b.latSpan, b.lngSpan) / 60, 0.25, 2.2),
       minLat: clamp(b.minLat - pad, -90, 90),
       maxLat: clamp(b.maxLat + pad, -90, 90),
@@ -555,7 +625,7 @@ loadCountryBorders();
 // viewport, using the camera's look-at point. Gated on a coarse altitude +
 // look-at bucket so it only rebuilds the label set on a meaningful camera
 // change, not every frame of a drag.
-const LABEL_VISIBILITY_FACTOR = 2.2;
+const LABEL_VISIBILITY_FACTOR = 4;
 const COUNTRY_LABEL_CAP = 60; // safety cap; keeps the largest/most prominent nearby countries if more would qualify
 let lastLabelKey = null;
 
@@ -584,8 +654,8 @@ function updateCountryLabels(altitude) {
     .sort((a, b) => b.altitude - a.altitude)
     .slice(0, COUNTRY_LABEL_CAP)
     .map(c => ({
-      lat: c.lat,
-      lng: c.lng,
+      lat: c.labelLat,
+      lng: c.labelLng,
       name: c.name,
       // Labels are 3D billboards anchored to the globe surface, so getting
       // closer already makes them look bigger on screen via perspective -
@@ -730,20 +800,23 @@ async function loadCountryFires(country) {
 const windToggleBtn = document.getElementById('windToggleBtn');
 let windOverlayOn = false;
 
-// A coarse worldwide sample grid, not one arrow per fire - keeps this to a
-// couple hundred wind lookups (one batched request) and a couple hundred
-// cheap animated arcs regardless of how many fires are loaded.
+// A worldwide sample grid dense enough that wind direction reads clearly
+// anywhere on the globe, not just a handful of widely-spaced points. Skips
+// the poles themselves (longitude is meaningless there) but otherwise
+// covers the whole surface. /api/wind/batch chunks + caches requests this
+// size internally, so this is still just a few outbound requests, not one
+// per point.
 function buildWindSampleGrid() {
   const points = [];
-  for (let lat = -60; lat <= 60; lat += 30) {
-    for (let lng = -180; lng < 180; lng += 30) {
+  for (let lat = -80; lat <= 80; lat += 10) {
+    for (let lng = -180; lng < 180; lng += 10) {
       points.push({ lat, lng });
     }
   }
   return points;
 }
 
-const WIND_ARC_LENGTH_KM = 600; // long enough to read as a "streak" without a whole grid cell
+const WIND_ARC_LENGTH_KM = 250; // shorter than before to match the denser grid, so adjacent streaks don't overlap
 
 async function loadWindOverlay() {
   const points = buildWindSampleGrid();
