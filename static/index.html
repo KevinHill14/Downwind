@@ -95,6 +95,13 @@
       <span class="slider"></span>
     </label>
   </div>
+  <div class="switchRow">
+    <span>Show small fires</span>
+    <label class="switch">
+      <input type="checkbox" id="smallFiresToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
   <div class="sliderRow">
     <div class="rowTop">
       <span>Prediction range</span>
@@ -208,7 +215,7 @@ function makeCircleSpriteTexture() {
   return new THREE.CanvasTexture(canvas);
 }
 
-const FIRE_SPRITE_ALTITUDE = 0.001;
+const FIRE_SPRITE_ALTITUDE = 0.01;
 const FIRE_SPRITE_SIZE = 1.5; // world units; tune to taste once seen live
 
 const fireSpritesGeometry = new THREE.BufferGeometry();
@@ -302,6 +309,11 @@ const world = Globe()
   .labelAltitude(0.005)
   .labelsTransitionDuration(0);
 
+// Exposed for debugging from outside the module (e.g. driving pointOfView
+// from a test script) - the app script is type="module" now, so top-level
+// bindings like `world` no longer land on window automatically.
+window.world = world;
+
 // Groups fires within gridDeg of each other into a single marker, purely to
 // reduce visual clutter - the underlying detections are kept (in `.fires`)
 // rather than discarded, so nothing about the data is lost, only how
@@ -315,10 +327,9 @@ function gridForAltitude(altitude) {
   if (altitude > 0.6) return 0.5;
   if (altitude > 0.2) return 0.15;
   if (altitude > 0.05) return 0.05; // country-scale - ~5.5km, used to be the finest tier
-  // Below country-scale (viewport loading can zoom in much closer than a
-  // country view ever did) clustering keeps getting finer instead of
-  // plateauing at 5.5km, so zooming in keeps revealing more individual
-  // fires rather than hitting an invisible ceiling.
+  // Below country-scale, clustering keeps getting finer instead of
+  // plateauing at 5.5km, so zooming into a searched country keeps revealing
+  // more individual fires rather than hitting an invisible ceiling.
   if (altitude > 0.015) return 0.015; // ~1.7km
   return 0.003; // ~330m - close to VIIRS' own ~375m pixel size, i.e. near-individual detections
 }
@@ -374,8 +385,8 @@ function renderFireMarkers(fires, altitudeOverride) {
   updateFireSprites(lastClusters);
 }
 
-// For fires the backend already aggregated (see maybeUpdateViewportFires'
-// `grid` param) - each item already has {lat,lng,count,totalFrp,maxFrp},
+// For fires the backend already aggregated (see loadFires' `grid` param) -
+// each item already has {lat,lng,count,totalFrp,maxFrp},
 // the exact shape clusterFires() would have produced, so there's no
 // client-side re-clustering step (skips both that compute cost and having
 // to ship every raw detection to the browser just to immediately fold them
@@ -393,110 +404,35 @@ function renderPreClusteredMarkers(clusters) {
 // re-run against the fresh clusters instead of just dropped.
 let currentZoomTier = null;
 
-// Whether a country search is the active view - viewport-loading (below)
-// stays out of the way while one is, since loadCountryFires already fetched
-// that country's complete fire set up front.
+// Whether a country search is the active view - country search stays
+// authoritative over whatever's rendered while one is active, since
+// loadCountryFires already fetched that country's complete fire set.
 let inCountryView = false;
 
-// Zoomed-out (whole earth) view stays on the fast capped/cached overview -
-// fetching every fire on the planet at full detail just to show 2500 of
-// them would be slow for no visual benefit. Zoomed in past this altitude,
-// "just show me what's visible" becomes a small enough area that fetching
-// it at FULL detail (uncapped, no uniform-worldwide compromise) is both
-// fast and actually gets every fire in that region - the same per-region
-// completeness a country search already gets, without requiring a search
-// first. This is also the fix for fires that exist but weren't intense
-// enough to make the worldwide top-N cut. Set just below the default
-// whole-earth altitude (2.2) and the Quick Look continent buttons' target
-// (1.8) - both of those need to actually engage this, not just a manual
-// zoom well past them, or "zoom into a region" silently does nothing most
-// of the time.
-const VIEWPORT_MODE_ALTITUDE = 2.0;
-let inViewportDetailMode = false;
-let lastViewportKey = null;
+// Density/render cost is controlled SOLELY by the Detail level slider now,
+// not by camera altitude. An earlier version re-fetched and re-clustered at
+// a finer server-side grid the closer you zoomed in ("viewport mode") - in
+// testing that made close zoom both slower (near-individual-detection
+// cluster counts) and visually worse (clusters snap to a visible grid at
+// fine resolutions, looking artificial). Camera zoom is now purely visual:
+// the same slider-controlled cluster set stays rendered regardless of how
+// close the camera gets, so panning/zooming around the globe never
+// triggers a new fetch or a render cost change.
 
-// The actual fetch is fast now (a local in-memory filter, not a live NASA
-// call), so it's NOT what made zooming feel broken. The real cost is
-// rendering - updateFireSprites() rebuilds the sprite buffer for every
-// marker on screen, and during a continuous zoom the shrinking
-// viewport box crosses a new bucket on nearly every 250ms poll tick, so
-// that full rebuild was firing repeatedly THROUGHOUT the zoom gesture -
-// visible jank on every scroll. Throttled (not debounced): waiting for the
-// camera to fully stop before rendering anything looks worse, not better -
-// the markers would just sit frozen (wrong for wherever you'd zoomed to)
-// for the whole gesture and then suddenly snap at the end. Throttling
-// instead renders periodically WHILE you're still moving, so it keeps
-// visibly catching up, and it naturally lands on the correct final view
-// within one throttle window of stopping (the next poll tick after that
-// window sees the settled key and renders it).
-let lastViewportRenderAt = 0;
-const VIEWPORT_RENDER_THROTTLE_MS = 400;
-
-async function maybeUpdateViewportFires() {
-  if (inCountryView) return;
-  const pov = world.pointOfView();
-
-  if (pov.altitude >= VIEWPORT_MODE_ALTITUDE) {
-    if (inViewportDetailMode) {
-      // Zoomed back out past the threshold - restore the world overview
-      // instead of leaving a small region's fires rendered alone on a wide
-      // view.
-      inViewportDetailMode = false;
-      lastViewportKey = null;
-      renderPreClusteredMarkers(ALL_FIRES);
-      statusEl.textContent = `${ALL_FIRES_RAW_COUNT} active fire detections worldwide`;
-    }
-    return;
-  }
-
-  // Half-width of the fetch bbox in degrees - smaller than the label/wind
-  // viewport radius since this is "what's actually on screen to fetch in
-  // full," not a generous margin.
-  const radius = clamp(pov.altitude * 40, 3, 40);
-  const west = clamp(pov.lng - radius, -180, 180);
-  const east = clamp(pov.lng + radius, -180, 180);
-  const south = clamp(pov.lat - radius, -90, 90);
-  const north = clamp(pov.lat + radius, -90, 90);
-
-  // Same zoom-tier grid the world/country views use (gridForAltitude) -
-  // coarser clustering zoomed out, finer (down to near-individual fires)
-  // zoomed in, instead of a single fixed grid regardless of how close the
-  // camera actually is.
-  const gridDeg = gridForAltitude(pov.altitude);
-  const key = `${gridDeg},${Math.round(west / 2)},${Math.round(south / 2)},${Math.round(east / 2)},${Math.round(north / 2)}`;
-
-  if (key === lastViewportKey) return; // nothing new to show
-  const now = performance.now();
-  if (now - lastViewportRenderAt < VIEWPORT_RENDER_THROTTLE_MS) return; // rendered too recently - catch up next tick
-  lastViewportRenderAt = now;
-  lastViewportKey = key;
-  inViewportDetailMode = true;
-
-  // No intensity cap here (unlike the world overview) - a global top-FRP
-  // cutoff sounds harmless but isn't: checked directly against real data,
-  // a weak-but-real Ontario fire can rank near dead last out of tens of
-  // thousands when a whole continent's worth of stronger fires elsewhere
-  // are competing for the same cap, so "capped to the N most intense"
-  // silently drops exactly the regional detections this mode exists to
-  // surface. Every fire in the visible area is shown - the backend
-  // aggregates them into the same grid this mode renders at anyway (see
-  // renderPreClusteredMarkers), so a dense area comes back as far fewer
-  // cluster points instead of every raw detection, without actually
-  // leaving any fire out of those totals.
-  const bbox = [west, south, east, north].join(',');
-  try {
-    const res = await fetch(`/api/fires?bbox=${encodeURIComponent(bbox)}&grid=${gridDeg}`);
-    const json = await res.json();
-    if (!res.ok) return;
-    // The camera may have moved on to a different area, or a country search
-    // may have started, while this was in flight - a stale response
-    // shouldn't overwrite whatever's actually current now.
-    if (inCountryView || lastViewportKey !== key) return;
-    renderPreClusteredMarkers(json.fires);
-    statusEl.textContent = `${json.raw_count} active fire detection(s) in view`;
-  } catch (err) {
-    // Keep whatever was already showing rather than clearing it on a blip.
-  }
+// "Show small fires" toggle: off by default. Below this FRP (MW), a fire is
+// a flat intensity floor, not a rank-based cap - a fire either clears
+// MIN_FRP_THRESHOLD or it doesn't, regardless of how it compares to fires
+// elsewhere, so this doesn't reintroduce the "real regional fire loses out
+// to stronger fires on the other side of the world" problem a top-N cap
+// caused earlier. ~25th percentile of current worldwide FRP, so it trims
+// the weakest quarter of detections (the ones nobody's actually looking
+// for) without touching anything a person would call "a real fire."
+// Country search intentionally ignores this - that mode exists specifically
+// for full detail on a place you've already chosen to drill into.
+const MIN_FRP_THRESHOLD = 3;
+const smallFiresToggle = document.getElementById('smallFiresToggle');
+function currentMinFrp() {
+  return smallFiresToggle.checked ? null : MIN_FRP_THRESHOLD;
 }
 
 // Reacting to camera movement is polled, not event-driven off
@@ -505,22 +441,19 @@ async function maybeUpdateViewportFires() {
 // the Quick Look continent buttons and every country-search flyTo) moves
 // the camera via three-globe's own tween and does NOT reliably dispatch
 // 'change', so anything wired only to that event silently never ran after
-// those actions - country labels never updated and viewport fire-loading
-// never engaged unless you happened to manually drag/scroll afterward.
-// That inconsistency (works via mouse, not via buttons/search) was the
-// actual bug, not the altitude threshold itself. Polling checks the real
+// those actions - country labels never updated after a button click unless
+// you happened to manually drag/scroll afterward. Polling checks the real
 // camera state directly, so it works the same regardless of how the camera
 // got there. Each check below is itself cheap/bucket-gated (see
-// updateCountryLabels/maybeUpdateViewportFires), so polling a few times a
-// second costs effectively nothing when nothing's actually changed.
+// updateCountryLabels), so polling a few times a second costs effectively
+// nothing when nothing's actually changed.
 setInterval(() => {
   const pov = world.pointOfView();
   updateCountryLabels(pov.altitude);
-  maybeUpdateViewportFires();
 
   // Re-cluster (not re-fetch) a country view's already-complete local fire
-  // set whenever the camera crosses into a different zoom tier - the
-  // viewport-loading path above owns re-rendering everywhere else.
+  // set whenever the camera crosses into a different zoom tier - the world
+  // view doesn't do this at all now (see the Detail level slider comment).
   if (inCountryView && lastRenderedFires.length > 0) {
     const tier = gridForAltitude(pov.altitude);
     if (tier !== currentZoomTier) {
@@ -795,8 +728,6 @@ countrySearch.addEventListener('input', () => {
     lastPredictedCountry = null;
     lastPredictedFires = null;
     inCountryView = false;
-    inViewportDetailMode = false;
-    lastViewportKey = null;
     loadFires();
   }
 });
@@ -854,9 +785,6 @@ predictionStrengthSlider.addEventListener('change', () => {
   }
 });
 
-let ALL_FIRES = [];
-let ALL_FIRES_RAW_COUNT = 0;
-
 // Fetches the accurate, full fire set for a country's bbox (the initial world
 // view holds every fire, but pre-clustered at a coarse grid for render speed -
 // see the detail-level slider - so individual small fires in a given country
@@ -869,8 +797,6 @@ let ALL_FIRES_RAW_COUNT = 0;
 // searched country).
 async function loadCountryFires(country) {
   inCountryView = true;
-  inViewportDetailMode = false;
-  lastViewportKey = null;
   statusEl.textContent = `Loading fires for ${country.name}...`;
   const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
   try {
@@ -1299,12 +1225,14 @@ document.querySelectorAll('#continentPanel button').forEach(btn => {
   });
 });
 
-// Every fire worldwide is always included - nothing is capped/dropped. The
+// Every fire worldwide is included - nothing is capped/dropped by rank. The
 // slider instead controls how coarse the server-side clustering grid is:
 // coarser grids merge more fires per marker, which is cheap to compute and
 // cheap to render at a zoomed-out view. Every fire still contributes to its
 // cluster's totals (see _cluster_fires in main.py), so this never hides a
-// region the way a top-N-by-intensity cap would.
+// region the way a top-N-by-intensity cap would. The only fires excluded
+// are ones below MIN_FRP_THRESHOLD, and only when "Show small fires" is off
+// - a flat intensity floor applied equally everywhere, not a competition.
 const DETAIL_GRID_STEPS = [3.0, 1.5, 1.0, 0.5, 0.3, 0.2, 0.1];
 const FIRE_COUNT_LABELS = ['Sparse', 'Coarse', 'Medium', 'Fine', 'Finer', 'Finest', 'Max'];
 const fireCountSlider = document.getElementById('fireCountSlider');
@@ -1312,14 +1240,14 @@ const fireCountLabel = document.getElementById('fireCountLabel');
 
 async function loadFires() {
   const gridDeg = DETAIL_GRID_STEPS[+fireCountSlider.value];
+  const minFrp = currentMinFrp();
+  const minFrpParam = minFrp !== null ? `&min_frp=${minFrp}` : '';
   statusEl.textContent = 'Loading fire data...';
   try {
-    const res = await fetch(`/api/fires?grid=${gridDeg}`);
+    const res = await fetch(`/api/fires?grid=${gridDeg}${minFrpParam}`);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
-    ALL_FIRES = json.fires;
-    ALL_FIRES_RAW_COUNT = json.raw_count;
-    renderPreClusteredMarkers(ALL_FIRES);
+    renderPreClusteredMarkers(json.fires);
     statusEl.textContent = `${json.raw_count} active fire detections worldwide`;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
@@ -1331,6 +1259,11 @@ fireCountSlider.addEventListener('input', () => {
   fireCountLabel.textContent = FIRE_COUNT_LABELS[+fireCountSlider.value];
 });
 fireCountSlider.addEventListener('change', loadFires);
+
+smallFiresToggle.addEventListener('change', () => {
+  if (inCountryView) return; // country search always shows full detail
+  loadFires();
+});
 
 loadFires();
 </script>

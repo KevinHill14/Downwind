@@ -169,6 +169,9 @@ async def get_fires(
     grid: float | None = Query(
         None, description="pre-aggregate fires into grid_deg x grid_deg FRP-weighted clusters before returning"
     ),
+    min_frp: float | None = Query(
+        None, description="drop individual detections weaker than this FRP (MW) - the 'toggle small fires' filter"
+    ),
 ):
     if not FIRMS_MAP_KEY:
         raise HTTPException(
@@ -196,6 +199,14 @@ async def get_fires(
         # call, so this is the same cost whether it's the first time this
         # exact area has ever been requested or the thousandth.
         fires = _filter_bbox(fires, west, south, east, north)
+
+    if min_frp is not None:
+        # A flat intensity floor, not a top-N cap - every fire at or above
+        # min_frp still shows, regardless of how it ranks against fires
+        # elsewhere. That distinction matters: a rank-based cap can bury a
+        # real regional fire under stronger fires on the other side of the
+        # world, which is exactly the failure mode this app avoids elsewhere.
+        fires = [f for f in fires if f["frp"] >= min_frp]
 
     raw_count = len(fires)
 
