@@ -111,8 +111,8 @@
   </div>
   <div class="sliderRow">
     <div class="rowTop">
-      <span>Fires shown</span>
-      <span id="fireCountLabel">2.5k</span>
+      <span>Detail level</span>
+      <span id="fireCountLabel">Sparse</span>
     </div>
     <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="0" />
   </div>
@@ -139,7 +139,19 @@
 
 <script src="https://unpkg.com/globe.gl"></script>
 <script src="https://unpkg.com/topojson-client@3"></script>
-<script>
+<!-- type="module" so the fire-sprite layer can `import` its own three.js
+     instance directly, scoped to just this code - NOT window.THREE.
+     globe.gl (>=2.46, requires three >=0.179) bundles its own internal
+     three.js and never reads window.THREE unless something else set it
+     first; defining window.THREE ourselves previously broke globe.gl
+     globally because it picked up an incompatible three.js version for its
+     OWN rendering instead of its safe internal fallback. Importing three
+     as a separate module avoids that entirely: three.js's renderer uses
+     duck-typed flags (isPoints/isMesh/isObject3D) rather than instanceof
+     checks, so an Object3D built from this module's THREE still works fine
+     when added to globe.gl's scene via customThreeObject. -->
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.185.1/build/three.module.js';
 const statusEl = document.getElementById('status');
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -152,63 +164,97 @@ function intensityT(frp) {
   return clamp(Math.log1p(frp) / Math.log1p(FRP_SCALE_REF), 0, 1);
 }
 
-function fireTooltip(d) {
-  if (d.predicted) {
-    const label = d.count > 1 ? `${d.count} fires, combined FRP ${d.totalFrp.toFixed(1)} MW` : `FRP: ${d.totalFrp.toFixed(1)} MW`;
-    return `Projected ${d.predictionHours}hr position<br/>${label}<br/>Wind: ${d.windSpeedKmh.toFixed(1)} km/h`;
-  }
-  // Server-pre-clustered markers (the viewport-loading path) only carry
-  // the aggregate stats, not each raw detection - `d.fires` only exists
-  // for client-side-clustered data, so a single fire there still gets its
-  // own confidence/date/time, but a pre-clustered singleton (count === 1
-  // but no `.fires`) falls back to the same summary the count > 1 case uses.
-  if (d.count > 1 || !d.fires) {
-    return `${d.count} fire(s) here<br/>Combined FRP: ${d.totalFrp.toFixed(1)} MW<br/>Most intense: ${d.maxFrp.toFixed(1)} MW`;
-  }
-  const f = d.fires[0];
-  return `FRP: ${f.frp} MW<br/>Confidence: ${f.confidence}<br/>${f.acq_date} ${f.acq_time}`;
-}
-
-// Severity color: yellow (light) -> orange (middle) -> red (bad).
+// Severity color: 3 discrete buckets (yellow/orange/red), not a computed
+// gradient - cheaper to evaluate per-marker and matches how other fire
+// trackers bucket intensity for a quick glance instead of a precise reading.
 const SEVERITY_YELLOW = [255, 221, 51];
 const SEVERITY_ORANGE = [255, 140, 20];
 const SEVERITY_RED = [200, 30, 20];
-function severityColor(t) {
-  const [c1, c2, u] = t < 0.5 ? [SEVERITY_YELLOW, SEVERITY_ORANGE, t * 2] : [SEVERITY_ORANGE, SEVERITY_RED, (t - 0.5) * 2];
-  const r = lerp(c1[0], c2[0], u) | 0;
-  const g = lerp(c1[1], c2[1], u) | 0;
-  const b = lerp(c1[2], c2[2], u) | 0;
-  return `rgb(${r},${g},${b})`;
+function severityBucket(t) {
+  if (t < 1 / 3) return SEVERITY_YELLOW;
+  if (t < 2 / 3) return SEVERITY_ORANGE;
+  return SEVERITY_RED;
 }
 
 // Dimmed version of a severity color, used for a fire's old position once a
-// 24hr prediction has been run for it (the new predicted position gets the
+// prediction has been run for it (the new predicted position gets the
 // normal, full-brightness marker instead).
-function fadeColor(rgbString) {
-  const [r, g, b] = rgbString.match(/\d+/g).map(Number);
-  const DARK = 40;
-  return `rgb(${lerp(r, DARK, 0.75) | 0},${lerp(g, DARK, 0.75) | 0},${lerp(b, DARK, 0.75) | 0})`;
+const FADE_DARK = 40;
+function fadeRgb([r, g, b]) {
+  return [lerp(r, FADE_DARK, 0.75), lerp(g, FADE_DARK, 0.75), lerp(b, FADE_DARK, 0.75)];
+}
+
+// Fire markers render as a single THREE.Points sprite cloud instead of
+// per-marker 3D meshes: one small circular texture, one draw call for every
+// marker on screen regardless of count. This replaced a merged-cylinder-mesh
+// point layer (already batched to one draw call, but each marker still cost
+// dozens of vertices) - a point sprite costs a single vertex, so the win
+// scales with marker count. Tradeoff: no built-in hover tooltip (that relied
+// on three-globe's mesh raycasting), dropped intentionally - not needed.
+function makeCircleSpriteTexture() {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const r = size / 2;
+  const gradient = ctx.createRadialGradient(r, r, 0, r, r, r);
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.7, 'rgba(255,255,255,1)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(r, r, r, 0, Math.PI * 2);
+  ctx.fill();
+  return new THREE.CanvasTexture(canvas);
+}
+
+const FIRE_SPRITE_ALTITUDE = 0.001;
+const FIRE_SPRITE_SIZE = 1.5; // world units; tune to taste once seen live
+
+const fireSpritesGeometry = new THREE.BufferGeometry();
+const fireSpritesMaterial = new THREE.PointsMaterial({
+  map: makeCircleSpriteTexture(),
+  size: FIRE_SPRITE_SIZE,
+  sizeAttenuation: true,
+  vertexColors: true,
+  transparent: true,
+  alphaTest: 0.05,
+  depthWrite: false,
+});
+const fireSpritesObject = new THREE.Points(fireSpritesGeometry, fireSpritesMaterial);
+
+// Rebuilds the sprite cloud's position/color buffers from the current set of
+// markers (fire clusters, optionally mixed with predicted-position markers).
+// Replaces every world.pointsData(...) call the old mesh-based layer used.
+function updateFireSprites(markers) {
+  const positions = new Float32Array(markers.length * 3);
+  const colors = new Float32Array(markers.length * 3);
+  markers.forEach((d, i) => {
+    const coords = world.getCoords(d.lat, d.lng, FIRE_SPRITE_ALTITUDE);
+    positions[i * 3] = coords.x;
+    positions[i * 3 + 1] = coords.y;
+    positions[i * 3 + 2] = coords.z;
+    const [r, g, b] = d.faded ? fadeRgb(severityBucket(intensityT(d.totalFrp))) : severityBucket(intensityT(d.totalFrp));
+    colors[i * 3] = r / 255;
+    colors[i * 3 + 1] = g / 255;
+    colors[i * 3 + 2] = b / 255;
+  });
+  fireSpritesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  fireSpritesGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  fireSpritesGeometry.computeBoundingSphere();
 }
 
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
-  // Plain WebGL points, not HTML/DOM elements: three-globe repositions every
-  // marker's screen transform on every animation frame as the camera moves,
-  // and doing that for thousands of live DOM nodes (each also paying a
-  // box-shadow blur repaint) was the real cause of the lag - WebGL points
-  // render in one batched GPU draw call regardless of count.
-  // Each point is still a 3D cylinder mesh under the hood (not a sprite),
-  // so its cost scales with vertex count: near-zero altitude keeps it a
-  // flat dot instead of a raised bar (closer to how other fire trackers
-  // render markers, and less visually busy at high density), and a lower
-  // radial segment count means fewer vertices per marker - the two knobs
-  // that actually matter for how heavy thousands of them are to render.
-  .pointAltitude(0.0005)
-  .pointResolution(6)
-  .pointRadius(d => lerp(0.04, 0.14, intensityT(d.totalFrp)))
-  .pointColor(d => (d.faded ? fadeColor(severityColor(intensityT(d.totalFrp))) : severityColor(intensityT(d.totalFrp))))
-  .pointLabel(fireTooltip)
+  // Fire markers are NOT a globe.gl points layer - see updateFireSprites()
+  // above. A single custom-object datum hosts the whole sprite cloud so
+  // it's parented/positioned correctly under the globe, but its buffers are
+  // filled and refreshed by updateFireSprites(), not by globe.gl's own
+  // per-datum reactive update path.
+  .customLayerData([{}])
+  .customThreeObject(() => fireSpritesObject)
+  .customThreeObjectUpdate(() => {})
   .polygonCapColor(() => 'rgba(0,0,0,0)')
   .polygonSideColor(() => 'rgba(0,0,0,0)')
   .polygonStrokeColor(() => '#000000')
@@ -325,7 +371,7 @@ function renderFireMarkers(fires, altitudeOverride) {
   const gridDeg = gridForAltitude(altitude);
   currentZoomTier = gridDeg;
   lastClusters = clusterFires(fires, gridDeg);
-  world.pointsData(lastClusters);
+  updateFireSprites(lastClusters);
 }
 
 // For fires the backend already aggregated (see maybeUpdateViewportFires'
@@ -336,7 +382,7 @@ function renderFireMarkers(fires, altitudeOverride) {
 // back together).
 function renderPreClusteredMarkers(clusters) {
   lastClusters = clusters;
-  world.pointsData(lastClusters);
+  updateFireSprites(lastClusters);
 }
 
 // Re-cluster (not re-fetch) whenever the camera crosses into a different
@@ -371,8 +417,8 @@ let lastViewportKey = null;
 
 // The actual fetch is fast now (a local in-memory filter, not a live NASA
 // call), so it's NOT what made zooming feel broken. The real cost is
-// rendering - world.pointsData() rebuilds the WebGL geometry buffer for
-// every marker on screen, and during a continuous zoom the shrinking
+// rendering - updateFireSprites() rebuilds the sprite buffer for every
+// marker on screen, and during a continuous zoom the shrinking
 // viewport box crosses a new bucket on nearly every 250ms poll tick, so
 // that full rebuild was firing repeatedly THROUGHOUT the zoom gesture -
 // visible jank on every scroll. Throttled (not debounced): waiting for the
@@ -397,10 +443,8 @@ async function maybeUpdateViewportFires() {
       // view.
       inViewportDetailMode = false;
       lastViewportKey = null;
-      renderFireMarkers(ALL_FIRES);
-      statusEl.textContent = FIRE_COUNT_STEPS[+fireCountSlider.value]
-        ? `${ALL_FIRES.length} highest-intensity fire detections worldwide (search a country for full detail)`
-        : `${ALL_FIRES.length} active fire detections worldwide`;
+      renderPreClusteredMarkers(ALL_FIRES);
+      statusEl.textContent = `${ALL_FIRES_RAW_COUNT} active fire detections worldwide`;
     }
     return;
   }
@@ -811,11 +855,13 @@ predictionStrengthSlider.addEventListener('change', () => {
 });
 
 let ALL_FIRES = [];
+let ALL_FIRES_RAW_COUNT = 0;
 
 // Fetches the accurate, full fire set for a country's bbox (the initial world
-// view only holds a capped highest-intensity subset - see the fire count
-// slider - so smaller/less intense fires in a given country may be missing
-// from it). Renders ONLY this country's fires, replacing whatever was shown
+// view holds every fire, but pre-clustered at a coarse grid for render speed -
+// see the detail-level slider - so individual small fires in a given country
+// are merged into their cluster rather than shown separately). Renders ONLY
+// this country's fires, replacing whatever was shown
 // before - merging into the accumulated world dataset used to mean a search
 // after "Show all fires" reclustered and predicted on the entire world's
 // fires at the country's fine zoom grid (slow, and predictions landed
@@ -920,7 +966,7 @@ function clearPredictions() {
   predictionPaths = [];
   world.pathsData(predictionPaths);
   lastClusters.forEach(c => { c.faded = false; });
-  world.pointsData(lastClusters);
+  updateFireSprites(lastClusters);
   predictionPanel.style.display = 'none';
 }
 
@@ -1211,7 +1257,7 @@ async function runCountryPredictions(country, fires) {
     predictionPaths = newPaths;
   }
 
-  world.pointsData([...lastClusters, ...predictedMarkers]);
+  updateFireSprites([...lastClusters, ...predictedMarkers]);
 
   const projectedCount = strength === 1 ? newArcs.length : newPaths.length;
   predictionInfo.innerHTML = `
@@ -1253,26 +1299,28 @@ document.querySelectorAll('#continentPanel button').forEach(btn => {
   });
 });
 
-// Slider steps replace the old all-or-nothing toggle: fast initial paint at
-// 2.5k, working up to the full worldwide dataset.
-const FIRE_COUNT_STEPS = [2500, 10000, 20000, 30000, 40000, 50000, null]; // null = all
-const FIRE_COUNT_LABELS = ['2.5k', '10k', '20k', '30k', '40k', '50k', 'All'];
+// Every fire worldwide is always included - nothing is capped/dropped. The
+// slider instead controls how coarse the server-side clustering grid is:
+// coarser grids merge more fires per marker, which is cheap to compute and
+// cheap to render at a zoomed-out view. Every fire still contributes to its
+// cluster's totals (see _cluster_fires in main.py), so this never hides a
+// region the way a top-N-by-intensity cap would.
+const DETAIL_GRID_STEPS = [3.0, 1.5, 1.0, 0.5, 0.3, 0.2, 0.1];
+const FIRE_COUNT_LABELS = ['Sparse', 'Coarse', 'Medium', 'Fine', 'Finer', 'Finest', 'Max'];
 const fireCountSlider = document.getElementById('fireCountSlider');
 const fireCountLabel = document.getElementById('fireCountLabel');
 
 async function loadFires() {
-  const limit = FIRE_COUNT_STEPS[+fireCountSlider.value];
-  statusEl.textContent = limit ? 'Loading fire data...' : 'Loading all fires worldwide...';
+  const gridDeg = DETAIL_GRID_STEPS[+fireCountSlider.value];
+  statusEl.textContent = 'Loading fire data...';
   try {
-    const url = limit ? `/api/fires?limit=${limit}` : '/api/fires';
-    const res = await fetch(url);
+    const res = await fetch(`/api/fires?grid=${gridDeg}`);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
     ALL_FIRES = json.fires;
-    renderFireMarkers(ALL_FIRES);
-    statusEl.textContent = limit
-      ? `${json.fires.length} highest-intensity fire detections worldwide (search a country for full detail)`
-      : `${json.fires.length} active fire detections worldwide`;
+    ALL_FIRES_RAW_COUNT = json.raw_count;
+    renderPreClusteredMarkers(ALL_FIRES);
+    statusEl.textContent = `${json.raw_count} active fire detections worldwide`;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
