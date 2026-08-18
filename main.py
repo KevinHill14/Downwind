@@ -86,7 +86,7 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
     return fires
 
 
-async def _get_area_fires(area: str) -> list[dict]:
+async def _get_area_fires(area: str, sources: list[str]) -> list[dict]:
     if not FIRMS_MAP_KEY:
         raise HTTPException(
             status_code=500,
@@ -94,17 +94,49 @@ async def _get_area_fires(area: str) -> list[dict]:
             "Get a free key at https://firms.modaps.eosdis.nasa.gov/api/",
         )
 
+    # Cache key includes which sources were requested - a "fast" (one
+    # source) world overview and the "full" (all sources) view of the same
+    # area are genuinely different datasets, not interchangeable.
+    cache_key = f"{area}|{','.join(sources)}"
     now = time.time()
-    cached = _cache.get(area)
+    cached = _cache.get(cache_key)
     if cached is not None and (now - cached["fetched_at"]) < CACHE_TTL_SECONDS:
         return cached["data"]
 
-    # All sources for this area in parallel - fetching them one at a time
-    # would multiply the request latency by the number of satellites.
-    results = await asyncio.gather(*(_fetch_firms_fires(area, source) for source in FIRMS_SOURCES))
+    # All requested sources for this area in parallel - fetching them one at
+    # a time would multiply the request latency by the number of satellites.
+    # Each FIRMS source is itself a slow call for a whole-world area (NASA's
+    # server takes seconds to generate the CSV, independent of our own
+    # network), so for the fast initial "just show me the top N" world view
+    # the caller passes only one source rather than all of them.
+    results = await asyncio.gather(*(_fetch_firms_fires(area, source) for source in sources))
     fires = [f for source_fires in results for f in source_fires]
-    _cache[area] = {"data": fires, "fetched_at": now}
+    _cache[cache_key] = {"data": fires, "fetched_at": now}
     return fires
+
+
+WORLD_AREA = "-180,-90,180,90"
+
+
+async def _warm_world_cache_loop():
+    """NASA's server itself takes several seconds to generate a whole-world
+    CSV, independent of anything on our end - refreshing the world caches
+    proactively in the background (just before they'd expire) means a real
+    visitor's first load almost always hits a warm cache instead of paying
+    that cost live."""
+    while True:
+        try:
+            await _get_area_fires(WORLD_AREA, FIRMS_SOURCES[:1])  # fast capped overview
+            await _get_area_fires(WORLD_AREA, FIRMS_SOURCES)  # full "All fires" view
+        except Exception:
+            pass  # a transient NASA hiccup here shouldn't take down the warm loop
+        await asyncio.sleep(max(60, CACHE_TTL_SECONDS - 120))
+
+
+@app.on_event("startup")
+async def _on_startup():
+    if FIRMS_MAP_KEY:
+        asyncio.create_task(_warm_world_cache_loop())
 
 
 @app.get("/api/fires")
@@ -136,7 +168,14 @@ async def get_fires(
             raise HTTPException(status_code=400, detail="bbox must satisfy west<east and south<north")
         area = f"{west},{south},{east},{north}"
 
-    fires = await _get_area_fires(area)
+    # A bbox search (a specific country) or the explicit "All" world view
+    # (limit=None) both want full completeness across every satellite. The
+    # fast capped world overview (a limit, no bbox) only needs to find the
+    # highest-FRP fires quickly, and one source's worth of candidates is
+    # already far more than `limit` - not worth waiting on every satellite
+    # just to throw most of the results away.
+    sources = FIRMS_SOURCES if (bbox is not None or limit is None) else FIRMS_SOURCES[:1]
+    fires = await _get_area_fires(area, sources)
     if limit is not None:
         fires = sorted(fires, key=lambda f: f["frp"], reverse=True)[:limit]
 

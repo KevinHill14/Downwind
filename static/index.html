@@ -89,13 +89,6 @@
 <div id="status">Loading fire data...</div>
 <div id="optimizePanel">
   <div class="switchRow">
-    <span>Optimize</span>
-    <label class="switch">
-      <input type="checkbox" id="optimizeToggle" />
-      <span class="slider"></span>
-    </label>
-  </div>
-  <div class="switchRow">
     <span>Prediction</span>
     <label class="switch">
       <input type="checkbox" id="predictionToggle" checked />
@@ -148,85 +141,9 @@
 <script src="https://unpkg.com/topojson-client@3"></script>
 <script>
 const statusEl = document.getElementById('status');
-const optimizeToggle = document.getElementById('optimizeToggle');
-
-// Builds a single lightweight flat-color texture for "Optimize" mode:
-// land is shaded green (darker toward higher elevation/mountains), ocean is blue.
-// Uses a real land/ocean mask + elevation heightmap, downsampled once and
-// recolored on a canvas, so at render time it's just one small static texture
-// with no bump displacement, atmosphere, or starfield background.
-function loadImage(url) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
-  });
-}
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-async function buildSimpleTexture() {
-  const W = 512, H = 256;
-
-  const [waterImg, elevImg] = await Promise.all([
-    loadImage('https://unpkg.com/three-globe/example/img/earth-water.png'),
-    loadImage('https://unpkg.com/three-globe/example/img/earth-topology.png'),
-  ]);
-
-  const wCanvas = document.createElement('canvas');
-  wCanvas.width = W; wCanvas.height = H;
-  const wCtx = wCanvas.getContext('2d');
-  wCtx.drawImage(waterImg, 0, 0, W, H);
-  const waterData = wCtx.getImageData(0, 0, W, H).data;
-
-  const eCanvas = document.createElement('canvas');
-  eCanvas.width = W; eCanvas.height = H;
-  const eCtx = eCanvas.getContext('2d');
-  eCtx.drawImage(elevImg, 0, 0, W, H);
-  const elevData = eCtx.getImageData(0, 0, W, H).data;
-
-  // Normalize elevation using only land pixels (ocean elevation values are
-  // clamped near 0 and would otherwise skew the range).
-  const landElevs = [];
-  for (let i = 0; i < W * H; i++) {
-    if (waterData[i * 4] < 180) landElevs.push(elevData[i * 4]);
-  }
-  landElevs.sort((a, b) => a - b);
-  const lo = landElevs[Math.floor(landElevs.length * 0.05)] || 0;
-  const hi = landElevs[Math.floor(landElevs.length * 0.95)] || 255;
-
-  const out = wCtx.createImageData(W, H);
-  for (let i = 0; i < W * H; i++) {
-    const idx = i * 4;
-    const isOcean = waterData[idx] >= 180;
-    if (isOcean) {
-      // gentle vertical gradient: brighter blue near the equator, darker toward poles
-      const y = Math.floor(i / W);
-      const t = Math.abs(y - H / 2) / (H / 2);
-      out.data[idx] = lerp(20, 8, t);
-      out.data[idx + 1] = lerp(90, 45, t);
-      out.data[idx + 2] = lerp(160, 95, t);
-    } else {
-      const t = clamp((elevData[idx] - lo) / ((hi - lo) || 1), 0, 1);
-      // low elevation -> bright lowland green, high elevation -> dark mountain green
-      out.data[idx] = lerp(55, 95, t);
-      out.data[idx + 1] = lerp(145, 75, t);
-      out.data[idx + 2] = lerp(60, 55, t);
-    }
-    out.data[idx + 3] = 255;
-  }
-  wCtx.putImageData(out, 0, 0);
-  return wCanvas.toDataURL();
-}
-
-let simpleTexturePromise = null;
-function getSimpleTexture() {
-  if (!simpleTexturePromise) simpleTexturePromise = buildSimpleTexture();
-  return simpleTexturePromise;
-}
 
 // Fire severity scale: log-normalized so a handful of very intense fires
 // (or clusters) don't wash out everything else at max marker size.
@@ -400,8 +317,15 @@ function renderFireMarkers(fires, altitudeOverride) {
 // the old faded/predicted state, so if a prediction was showing, it's
 // re-run against the fresh clusters instead of just dropped.
 let currentZoomTier = null;
+// Country labels are TextGeometry meshes (like the fire "!" labels used to
+// be) - rebuilding up to COUNTRY_LABEL_CAP of them is fine once, but the
+// 'change' event fires continuously while dragging the globe, and a plain
+// per-event call was doing that rebuild dozens of times a second mid-drag.
+// Debounced so it only recomputes once the camera actually settles.
+let labelUpdateTimer = null;
 world.controls().addEventListener('change', () => {
-  updateCountryLabels(world.pointOfView().altitude);
+  clearTimeout(labelUpdateTimer);
+  labelUpdateTimer = setTimeout(() => updateCountryLabels(world.pointOfView().altitude), 150);
 
   if (lastRenderedFires.length === 0) return;
   const tier = gridForAltitude(world.pointOfView().altitude);
@@ -1152,36 +1076,15 @@ predictionToggle.addEventListener('change', () => {
   }
 });
 
-function applyRealisticMode() {
-  world
-    // Satellite/day imagery, not night-lights - closer to how other fire
-    // trackers (e.g. FireMap.live) present the globe, and it's genuinely
-    // more useful here since it shows the actual terrain/vegetation a fire
-    // is burning through, not just city lights.
-    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
-    .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
-    .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-    .showAtmosphere(true);
-}
-
-async function applySimpleMode() {
-  world
-    .bumpImageUrl(null)
-    .backgroundImageUrl(null)
-    .showAtmosphere(false);
-  const texture = await getSimpleTexture();
-  world.globeImageUrl(texture);
-}
-
-applyRealisticMode();
-
-optimizeToggle.addEventListener('change', () => {
-  if (optimizeToggle.checked) {
-    applySimpleMode();
-  } else {
-    applyRealisticMode();
-  }
-});
+// Satellite/day imagery, not night-lights - closer to how other fire
+// trackers (e.g. FireMap.live) present the globe, and it's genuinely more
+// useful here since it shows the actual terrain/vegetation a fire is
+// burning through, not just city lights.
+world
+  .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
+  .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
+  .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
+  .showAtmosphere(true);
 
 document.querySelectorAll('#continentPanel button').forEach(btn => {
   btn.addEventListener('click', () => {
