@@ -27,7 +27,13 @@ from pydantic import BaseModel
 
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
 FIRMS_SOURCE = "VIIRS_SNPP_NRT"  # ~375m resolution, updated every ~3-4 hours
-FIRMS_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{area}/1"
+# Day range of 2 (not 1) - NASA's near-real-time feed occasionally has a
+# short ingestion gap where the most recent ~24h has nothing processed yet
+# even though the source itself is fine (confirmed directly against FIRMS:
+# day-range 1 returned zero rows worldwide while day-range 3 returned
+# 179k), so this adds a small buffer against that rather than the app
+# looking broken/keyless during a transient NASA-side gap.
+FIRMS_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{area}/2"
 
 app = FastAPI(title="Fire Tracker")
 app.add_middleware(
@@ -100,7 +106,10 @@ async def get_fires(
         None, description="return only the N highest-intensity (FRP) fires, for a fast initial world view"
     ),
 ):
-    area = "world"
+    # FIRMS' API silently returns zero rows for the literal string "world" -
+    # it needs an actual bbox, so the default (whole-earth) case uses the
+    # full lat/lng range explicitly instead.
+    area = "-180,-90,180,90"
     if bbox is not None:
         parts = bbox.split(",")
         if len(parts) != 4:

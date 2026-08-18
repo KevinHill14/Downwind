@@ -300,18 +300,11 @@ const world = Globe()
   .arcStartLng(d => d.startLng)
   .arcEndLat(d => d.endLat)
   .arcEndLng(d => d.endLng)
-  .arcColor(d => d.color)
+  .arcColor(() => '#ffffff')
   .arcStroke(0.075)
   .arcAltitude(0.008) // fixed, not auto-scaled - these spread distances are short
   // enough (tens to low-hundreds of km) that auto altitude flattened arcs
   // right onto the surface and they z-fought with the globe texture
-  // Prediction arcs stay solid (dashLength 1 + gap 0 = no visible dash,
-  // matching the old always-solid behavior); only the wind flow overlay
-  // animates - a moving dash reads as "flowing toward" far better than a
-  // static rotated arrow glyph did.
-  .arcDashLength(d => (d.animated ? 0.4 : 1))
-  .arcDashGap(d => (d.animated ? 0.3 : 0))
-  .arcDashAnimateTime(d => (d.animated ? 4000 : 0))
   .arcsTransitionDuration(0)
   // Multi-point trajectory for prediction strength 2+ (hourly-stepped path,
   // bending as the wind shifts), as opposed to the single straight arc
@@ -327,16 +320,18 @@ const world = Globe()
   // tuned to match arcStroke's value.
   .pathStroke(1)
   .pathTransitionDuration(0)
-  // Country name labels only - a handful of TextGeometry objects (capped,
-  // see updateCountryLabels), nothing like the per-fire "!" labels that
-  // caused the old zoom-in lag (those rebuilt hundreds of glyphs on every
-  // zoom-tier change; this rebuilds at most COUNTRY_LABEL_CAP of them, and
-  // only when the visible set actually changes).
+  // Shared between country name labels and wind direction arrows (see
+  // updateLabelsLayer) - both stay small (country labels capped, wind
+  // arrows only built for what's currently on screen), nothing like the
+  // per-fire "!" labels that caused the old zoom-in lag (those rebuilt
+  // hundreds of glyphs on every zoom-tier change).
   .labelsData([])
   .labelLat(d => d.lat)
   .labelLng(d => d.lng)
-  .labelText(d => d.name)
-  .labelColor(() => '#ffffff')
+  .labelText(d => d.text ?? d.name)
+  .labelRotation(d => d.rot ?? 0)
+  .labelLabel(d => d.tooltip ?? '')
+  .labelColor(d => d.color ?? '#ffffff')
   .labelSize(d => d.size)
   .labelDotRadius(0)
   .labelIncludeDot(false)
@@ -379,14 +374,9 @@ function clusterFires(fires, gridDeg) {
   });
 }
 
-// The arcs layer is shared between two independent things - fire spread
-// predictions (white, solid) and the worldwide wind flow overlay (blue,
-// animated) - so they're combined here rather than each caller managing
-// world.arcsData() directly and clobbering the other's arcs.
 let predictionArcs = [];
-let windFlowArcs = [];
 function updateArcsLayer() {
-  world.arcsData([...predictionArcs, ...windFlowArcs]);
+  world.arcsData(predictionArcs);
 }
 
 // Plain white line from each predicted fire's original position to its
@@ -424,6 +414,7 @@ function renderFireMarkers(fires, altitudeOverride) {
 let currentZoomTier = null;
 world.controls().addEventListener('change', () => {
   updateCountryLabels(world.pointOfView().altitude);
+  updateWindOverlay();
 
   if (lastRenderedFires.length === 0) return;
   const tier = gridForAltitude(world.pointOfView().altitude);
@@ -629,6 +620,15 @@ const LABEL_VISIBILITY_FACTOR = 4;
 const COUNTRY_LABEL_CAP = 60; // safety cap; keeps the largest/most prominent nearby countries if more would qualify
 let lastLabelKey = null;
 
+// The labels layer is shared between country names and wind arrows (see
+// updateWindOverlay below) - both go through this so one doesn't clobber
+// the other's entries.
+let countryLabels = [];
+let windArrowLabels = [];
+function updateLabelsLayer() {
+  world.labelsData([...countryLabels, ...windArrowLabels]);
+}
+
 function updateCountryLabels(altitude) {
   const pov = world.pointOfView();
   const key = `${Math.round(altitude * 20)}|${Math.round(pov.lat / 2)}|${Math.round(pov.lng / 2)}`;
@@ -644,7 +644,7 @@ function updateCountryLabels(altitude) {
   // itself still spans into view.
   const visibleRadiusDeg = clamp(altitude * 90, 6, 180);
 
-  const visible = COUNTRY_LIST
+  countryLabels = COUNTRY_LIST
     .filter(c => altitude <= c.altitude * LABEL_VISIBILITY_FACTOR)
     .filter(c => {
       const dLat = pov.lat - c.lat;
@@ -664,7 +664,7 @@ function updateCountryLabels(altitude) {
       size: clamp(altitude * 0.9, 0.18, 1.0),
     }));
 
-  world.labelsData(visible);
+  updateLabelsLayer();
 }
 
 function renderCountryResults(query) {
@@ -796,59 +796,83 @@ async function loadCountryFires(country) {
 
 // Label glyphs point "south" (down-screen) at rotation 0, rotating clockwise
 // from there - empirically verified against the compass, not a documented API.
+function bearingToLabelRotation(bearingDeg) {
+  return (180 - bearingDeg + 360) % 360;
+}
+
 // --- Wind direction overlay (toggled via the wind button, independent of predictions) ---
+// Real arrow glyphs (like a weather map), not a preloaded worldwide grid -
+// only fetched/rendered for roughly what's currently on screen, and
+// refetched as the camera moves, the same viewport-scoped + bucket-gated
+// approach as the country labels. A fixed worldwide grid was both wasted
+// work for anywhere off-screen and, at a density dense enough to look
+// continuous, laggy to keep live-updated.
 const windToggleBtn = document.getElementById('windToggleBtn');
 let windOverlayOn = false;
+let lastWindKey = null;
 
-// A worldwide sample grid dense enough that wind direction reads clearly
-// anywhere on the globe, not just a handful of widely-spaced points. Skips
-// the poles themselves (longitude is meaningless there) but otherwise
-// covers the whole surface. /api/wind/batch chunks + caches requests this
-// size internally, so this is still just a few outbound requests, not one
-// per point.
-function buildWindSampleGrid() {
+function buildWindViewportGrid(pov) {
+  const visibleRadiusDeg = clamp(pov.altitude * 90, 6, 180);
+  // Roughly a 9x9 grid across whatever's currently on screen, regardless of
+  // zoom level - a handful of arrows at whole-earth view, tightly packed
+  // ones once zoomed into a country.
+  const step = (visibleRadiusDeg * 2) / 8;
+  const seen = new Set();
   const points = [];
-  for (let lat = -80; lat <= 80; lat += 10) {
-    for (let lng = -180; lng < 180; lng += 10) {
+  for (let dLat = -visibleRadiusDeg; dLat <= visibleRadiusDeg; dLat += step) {
+    const lat = clamp(pov.lat + dLat, -85, 85);
+    for (let dLng = -visibleRadiusDeg; dLng <= visibleRadiusDeg; dLng += step) {
+      const lng = ((pov.lng + dLng + 540) % 360) - 180;
+      const key = `${lat.toFixed(1)},${lng.toFixed(1)}`;
+      if (seen.has(key)) continue; // longitude steps converge near the poles
+      seen.add(key);
       points.push({ lat, lng });
     }
   }
   return points;
 }
 
-const WIND_ARC_LENGTH_KM = 250; // shorter than before to match the denser grid, so adjacent streaks don't overlap
+async function updateWindOverlay() {
+  if (!windOverlayOn) return;
+  const pov = world.pointOfView();
+  const key = `${Math.round(pov.altitude * 20)}|${Math.round(pov.lat / 3)}|${Math.round(pov.lng / 3)}`;
+  if (key === lastWindKey) return;
+  lastWindKey = key;
 
-async function loadWindOverlay() {
-  const points = buildWindSampleGrid();
+  const points = buildWindViewportGrid(pov);
   const res = await fetch('/api/wind/batch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(points),
   });
-  if (!res.ok) return;
+  if (!windOverlayOn || !res.ok) return; // toggled off, or camera moved on, while this was in flight
   const json = await res.json();
-  windFlowArcs = json.results.map(wind => {
-    const end = destinationPoint(wind.lat, wind.lng, wind.wind_blowing_toward_deg, WIND_ARC_LENGTH_KM);
-    return {
-      startLat: wind.lat,
-      startLng: wind.lng,
-      endLat: end.lat,
-      endLng: end.lng,
-      color: '#66ccff',
-      animated: true,
-    };
-  });
-  updateArcsLayer();
+  // Same altitude-proportional sizing as country labels (perspective makes
+  // closer objects look bigger regardless), tuned a bit larger than the
+  // country-name formula since a thin caret needs more size to read clearly
+  // than a solid word does.
+  const arrowSize = clamp(pov.altitude * 1.3, 0.35, 1.4);
+  windArrowLabels = json.results.map(wind => ({
+    lat: wind.lat,
+    lng: wind.lng,
+    text: '^', // the label font's glyph set doesn't include arrow characters (rendered as a fallback shape) - a caret reads fine as an arrowhead once rotated
+    rot: bearingToLabelRotation(wind.wind_blowing_toward_deg),
+    color: '#66ccff',
+    size: arrowSize,
+    tooltip: `Wind: ${wind.wind_speed_kmh.toFixed(1)} km/h`,
+  }));
+  updateLabelsLayer();
 }
 
 windToggleBtn.addEventListener('click', async () => {
   windOverlayOn = !windOverlayOn;
   windToggleBtn.classList.toggle('active', windOverlayOn);
   if (windOverlayOn) {
-    await loadWindOverlay();
+    lastWindKey = null; // force a fresh fetch even if the camera hasn't moved since it was last on
+    await updateWindOverlay();
   } else {
-    windFlowArcs = [];
-    updateArcsLayer();
+    windArrowLabels = [];
+    updateLabelsLayer();
   }
 });
 
