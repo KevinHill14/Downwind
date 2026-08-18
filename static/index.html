@@ -1154,7 +1154,11 @@ predictionToggle.addEventListener('change', () => {
 
 function applyRealisticMode() {
   world
-    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-night.jpg')
+    // Satellite/day imagery, not night-lights - closer to how other fire
+    // trackers (e.g. FireMap.live) present the globe, and it's genuinely
+    // more useful here since it shows the actual terrain/vegetation a fire
+    // is burning through, not just city lights.
+    .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
     .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
     .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
     .showAtmosphere(true);

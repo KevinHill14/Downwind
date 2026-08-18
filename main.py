@@ -12,6 +12,7 @@ Serves:
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
 """
+import asyncio
 import os
 import time
 
@@ -26,7 +27,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
-FIRMS_SOURCE = "VIIRS_SNPP_NRT"  # ~375m resolution, updated every ~3-4 hours
+# Querying every current VIIRS NRT satellite, not just SNPP - a single
+# satellite only passes over a given spot a couple times a day, so relying
+# on one source alone was silently missing a large share of active fires
+# (confirmed against user reports of missing Ontario fires). All three are
+# ~375m resolution and directly comparable, so results are just concatenated.
+FIRMS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"]
 # Day range of 2 (not 1) - NASA's near-real-time feed occasionally has a
 # short ingestion gap where the most recent ~24h has nothing processed yet
 # even though the source itself is fine (confirmed directly against FIRMS:
@@ -47,15 +53,8 @@ _cache: dict[str, dict] = {}  # area -> {"data": [...], "fetched_at": float}
 CACHE_TTL_SECONDS = 15 * 60  # FIRMS refreshes every few hours; no need to hit it often
 
 
-async def _fetch_firms_fires(area: str) -> list[dict]:
-    if not FIRMS_MAP_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="FIRMS_MAP_KEY environment variable is not set. "
-            "Get a free key at https://firms.modaps.eosdis.nasa.gov/api/",
-        )
-
-    url = FIRMS_URL.format(key=FIRMS_MAP_KEY, source=FIRMS_SOURCE, area=area)
+async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
+    url = FIRMS_URL.format(key=FIRMS_MAP_KEY, source=source, area=area)
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -88,11 +87,22 @@ async def _fetch_firms_fires(area: str) -> list[dict]:
 
 
 async def _get_area_fires(area: str) -> list[dict]:
+    if not FIRMS_MAP_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="FIRMS_MAP_KEY environment variable is not set. "
+            "Get a free key at https://firms.modaps.eosdis.nasa.gov/api/",
+        )
+
     now = time.time()
     cached = _cache.get(area)
     if cached is not None and (now - cached["fetched_at"]) < CACHE_TTL_SECONDS:
         return cached["data"]
-    fires = await _fetch_firms_fires(area)
+
+    # All sources for this area in parallel - fetching them one at a time
+    # would multiply the request latency by the number of satellites.
+    results = await asyncio.gather(*(_fetch_firms_fires(area, source) for source in FIRMS_SOURCES))
+    fires = [f for source_fires in results for f in source_fires]
     _cache[area] = {"data": fires, "fetched_at": now}
     return fires
 
