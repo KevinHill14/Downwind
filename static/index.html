@@ -193,7 +193,14 @@ const world = Globe()
   // and doing that for thousands of live DOM nodes (each also paying a
   // box-shadow blur repaint) was the real cause of the lag - WebGL points
   // render in one batched GPU draw call regardless of count.
-  .pointAltitude(0.004)
+  // Each point is still a 3D cylinder mesh under the hood (not a sprite),
+  // so its cost scales with vertex count: near-zero altitude keeps it a
+  // flat dot instead of a raised bar (closer to how other fire trackers
+  // render markers, and less visually busy at high density), and a lower
+  // radial segment count means fewer vertices per marker - the two knobs
+  // that actually matter for how heavy thousands of them are to render.
+  .pointAltitude(0.0005)
+  .pointResolution(6)
   .pointRadius(d => lerp(0.04, 0.14, intensityT(d.totalFrp)))
   .pointColor(d => (d.faded ? fadeColor(severityColor(intensityT(d.totalFrp))) : severityColor(intensityT(d.totalFrp))))
   .pointLabel(fireTooltip)
@@ -304,7 +311,10 @@ function renderFireMarkers(fires, altitudeOverride) {
   // that know the real target altitude (e.g. a just-searched country) pass
   // it explicitly instead of relying on a live camera read.
   const altitude = altitudeOverride ?? world.pointOfView().altitude;
-  const gridDeg = gridForAltitude(altitude);
+  // A viewport-loaded set is already bounded to a small on-screen area (not
+  // the whole world), so it doesn't need the coarse world-scale clustering
+  // tiers - always cluster it at near-full detail.
+  const gridDeg = inViewportDetailMode ? 0.05 : gridForAltitude(altitude);
   currentZoomTier = gridDeg;
   lastClusters = clusterFires(fires, gridDeg);
   world.pointsData(lastClusters);
@@ -325,14 +335,18 @@ let inCountryView = false;
 
 // Zoomed-out (whole earth) view stays on the fast capped/cached overview -
 // fetching every fire on the planet at full detail just to show 2500 of
-// them would be slow for no visual benefit. But zoomed in past this
-// altitude, "just show me what's visible" becomes a small enough area that
-// fetching it at FULL detail (uncapped, no uniform-worldwide compromise) is
-// both fast and actually gets every fire in that region - the same
-// per-region completeness a country search already gets, without requiring
-// the user to search a country first. This is also the fix for fires that
-// exist but weren't intense enough to make the worldwide top-N cut.
-const VIEWPORT_MODE_ALTITUDE = 1.0;
+// them would be slow for no visual benefit. Zoomed in past this altitude,
+// "just show me what's visible" becomes a small enough area that fetching
+// it at FULL detail (uncapped, no uniform-worldwide compromise) is both
+// fast and actually gets every fire in that region - the same per-region
+// completeness a country search already gets, without requiring a search
+// first. This is also the fix for fires that exist but weren't intense
+// enough to make the worldwide top-N cut. Set just below the default
+// whole-earth altitude (2.2) and the Quick Look continent buttons' target
+// (1.8) - both of those need to actually engage this, not just a manual
+// zoom well past them, or "zoom into a region" silently does nothing most
+// of the time.
+const VIEWPORT_MODE_ALTITUDE = 2.0;
 let inViewportDetailMode = false;
 let lastViewportKey = null;
 
@@ -387,29 +401,39 @@ async function maybeUpdateViewportFires() {
   }
 }
 
-// Country labels are TextGeometry meshes (like the fire "!" labels used to
-// be) - rebuilding up to COUNTRY_LABEL_CAP of them is fine once, but the
-// 'change' event fires continuously while dragging the globe, and a plain
-// per-event call was doing that rebuild dozens of times a second mid-drag.
-// Debounced so it only recomputes once the camera actually settles.
-let labelUpdateTimer = null;
-let viewportFiresTimer = null;
-world.controls().addEventListener('change', () => {
-  clearTimeout(labelUpdateTimer);
-  labelUpdateTimer = setTimeout(() => updateCountryLabels(world.pointOfView().altitude), 150);
+// Reacting to camera movement is polled, not event-driven off
+// world.controls()'s 'change' event - that event only fires reliably for
+// direct mouse drag/scroll on OrbitControls. world.pointOfView() (used by
+// the Quick Look continent buttons and every country-search flyTo) moves
+// the camera via three-globe's own tween and does NOT reliably dispatch
+// 'change', so anything wired only to that event silently never ran after
+// those actions - country labels never updated and viewport fire-loading
+// never engaged unless you happened to manually drag/scroll afterward.
+// That inconsistency (works via mouse, not via buttons/search) was the
+// actual bug, not the altitude threshold itself. Polling checks the real
+// camera state directly, so it works the same regardless of how the camera
+// got there. Each check below is itself cheap/bucket-gated (see
+// updateCountryLabels/maybeUpdateViewportFires), so polling a few times a
+// second costs effectively nothing when nothing's actually changed.
+setInterval(() => {
+  const pov = world.pointOfView();
+  updateCountryLabels(pov.altitude);
+  maybeUpdateViewportFires();
 
-  clearTimeout(viewportFiresTimer);
-  viewportFiresTimer = setTimeout(maybeUpdateViewportFires, 300);
-
-  if (lastRenderedFires.length === 0) return;
-  const tier = gridForAltitude(world.pointOfView().altitude);
-  if (tier === currentZoomTier) return;
-  currentZoomTier = tier;
-  renderFireMarkers(lastRenderedFires);
-  if (predictionToggle.checked && lastPredictedCountry) {
-    runCountryPredictions(lastPredictedCountry, lastPredictedFires);
+  // Re-cluster (not re-fetch) a country view's already-complete local fire
+  // set whenever the camera crosses into a different zoom tier - the
+  // viewport-loading path above owns re-rendering everywhere else.
+  if (inCountryView && lastRenderedFires.length > 0) {
+    const tier = gridForAltitude(pov.altitude);
+    if (tier !== currentZoomTier) {
+      currentZoomTier = tier;
+      renderFireMarkers(lastRenderedFires);
+      if (predictionToggle.checked && lastPredictedCountry) {
+        runCountryPredictions(lastPredictedCountry, lastPredictedFires);
+      }
+    }
   }
-});
+}, 250);
 
 // Approximate polygon area (shoelace formula on raw lon/lat) - only used to
 // rank ring sizes, not for precise measurement.
