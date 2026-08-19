@@ -53,7 +53,10 @@
   .rangeSlider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
 
   #continentPanel {
-    position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 10;
+    /* Moved up near the top status box instead of vertically centered - both
+       #status and #statusSub sit above it at top:16px/54px, so 96px clears
+       them with a bit of margin whether or not statusSub is showing text. */
+    position: absolute; left: 16px; top: 96px; z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
   }
@@ -65,11 +68,18 @@
   #continentPanel button:hover { background: #e25822; }
 
   #continentPanel hr { width: 100%; border: none; border-top: 1px solid #444; margin: 4px 0; }
+  #countrySearchWrap { position: relative; display: flex; }
   #countrySearch {
     background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px;
-    padding: 7px 10px; font-size: 13px; outline: none;
+    padding: 7px 26px 7px 10px; font-size: 13px; outline: none; width: 100%;
   }
   #countrySearch:focus { border-color: #e25822; }
+  #countrySearchClear {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: #999; font-size: 16px; line-height: 1;
+    cursor: pointer; padding: 4px 6px; display: none;
+  }
+  #countrySearchClear:hover { color: #eee; }
   #countryResults { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
   #countryResults button {
     background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
@@ -96,11 +106,18 @@
     border-radius: 8px; font-size: 13px; max-width: 300px;
   }
   #addressPanel h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
+  #addressInputWrap { position: relative; display: flex; }
   #addressInput {
     width: 100%; box-sizing: border-box; background: #1a1a1a; color: #eee;
-    border: 1px solid #444; border-radius: 6px; padding: 8px 10px; font-size: 13px;
+    border: 1px solid #444; border-radius: 6px; padding: 8px 26px 8px 10px; font-size: 13px;
   }
   #addressInput:focus { border-color: #e25822; outline: none; }
+  #addressInputClear {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: #999; font-size: 16px; line-height: 1;
+    cursor: pointer; padding: 4px 6px; display: none;
+  }
+  #addressInputClear:hover { color: #eee; }
   #addressCheckBtn {
     margin-top: 6px; width: 100%; background: #e25822; color: #fff; border: none;
     border-radius: 6px; padding: 8px 12px; font-size: 13px; cursor: pointer; font-weight: 600;
@@ -116,9 +133,44 @@
   #addressRiskBadge.risk-safe { background: #2a5c2a; color: #a6e6a6; }
   #addressRiskBadge.risk-watch { background: #6b5a1e; color: #ffd97a; }
   #addressRiskBadge.risk-danger { background: #6b1e1e; color: #ff9a9a; }
+
+  #disclaimerBar {
+    position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); z-index: 9;
+    max-width: 640px; text-align: center; color: #777; font-size: 10px; line-height: 1.4;
+    padding: 2px 10px; pointer-events: none;
+  }
+  #disclaimerCredits { display: block; color: #555; }
+
+  #loadingOverlay {
+    position: fixed; inset: 0; z-index: 1000; background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #loadingBox { text-align: center; color: #eee; font-family: system-ui, sans-serif; }
+  #loadingBox p { margin: 4px 0; }
+  #loadingTitle { font-size: 16px; }
+  #loadingSub { font-size: 12.5px; color: #999; }
+  #loadingBar {
+    width: 220px; height: 6px; margin: 14px auto 0; border-radius: 999px;
+    background: #2a2a2a; overflow: hidden;
+  }
+  #loadingBarFill {
+    width: 40%; height: 100%; border-radius: 999px; background: #e25822;
+    animation: loadingSlide 1.1s ease-in-out infinite;
+  }
+  @keyframes loadingSlide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
 </style>
 </head>
 <body>
+<div id="loadingOverlay">
+  <div id="loadingBox">
+    <div id="loadingBar"><div id="loadingBarFill"></div></div>
+    <p id="loadingTitle">Loading fires</p>
+    <p id="loadingSub">This takes ~10 seconds</p>
+  </div>
+</div>
 <div id="status">Loading fire data...</div>
 <div id="statusSub"></div>
 <div id="optimizePanel">
@@ -146,23 +198,23 @@
   <div class="sliderRow">
     <div class="rowTop">
       <span>Prediction range</span>
-      <span id="predictionDaysLabel">1 day</span>
+      <span id="predictionDaysLabel">7 days</span>
     </div>
-    <input type="range" class="rangeSlider" id="predictionDaysSlider" min="1" max="7" step="1" value="1" />
+    <input type="range" class="rangeSlider" id="predictionDaysSlider" min="1" max="7" step="1" value="7" />
   </div>
   <div class="sliderRow">
     <div class="rowTop">
       <span>Prediction strength</span>
-      <span id="predictionStrengthLabel">1: Basic</span>
+      <span id="predictionStrengthLabel">2: Hourly wind</span>
     </div>
-    <input type="range" class="rangeSlider" id="predictionStrengthSlider" min="1" max="4" step="1" value="1" />
+    <input type="range" class="rangeSlider" id="predictionStrengthSlider" min="1" max="4" step="1" value="2" />
   </div>
   <div class="sliderRow">
     <div class="rowTop">
       <span>Detail level</span>
-      <span id="fireCountLabel">Sparse</span>
+      <span id="fireCountLabel">Fine</span>
     </div>
-    <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="0" />
+    <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="3" />
   </div>
 </div>
 <div id="continentPanel">
@@ -175,7 +227,10 @@
   <button data-lat="45" data-lng="-100" data-alt="1.8">North America</button>
   <button data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
   <hr />
-  <input type="text" id="countrySearch" placeholder="Search country..." autocomplete="off" />
+  <div id="countrySearchWrap">
+    <input type="text" id="countrySearch" placeholder="Search country..." autocomplete="off" />
+    <button id="countrySearchClear" title="Clear search">&times;</button>
+  </div>
   <div id="countryResults"></div>
 </div>
 <div id="predictionPanel">
@@ -185,14 +240,20 @@
 </div>
 <div id="addressPanel">
   <h3>Am I in danger?</h3>
-  <input type="text" id="addressInput" placeholder="Enter an address or place..." autocomplete="off" />
+  <div id="addressInputWrap">
+    <input type="text" id="addressInput" placeholder="Enter an address or place..." autocomplete="off" />
+    <button id="addressInputClear" title="Clear">&times;</button>
+  </div>
   <button id="addressCheckBtn">Check</button>
   <div id="addressResult">
     <span id="addressRiskBadge"></span>
     <p id="addressLocationLine"></p>
     <p id="addressProximityLine"></p>
-    <p id="addressPathLine"></p>
   </div>
+</div>
+<div id="disclaimerBar">
+  Fire data from satellite (NASA FIRMS) and ground (Natural Resources Canada CWFIS) sources - detections can be delayed, missed, or misattributed, and predicted spread is a rough estimate, not a guarantee. Do not rely on this tool for evacuation or safety decisions - always follow official emergency alerts.
+  <span id="disclaimerCredits">Data: NASA FIRMS &middot; Natural Resources Canada CWFIS &middot; Open-Meteo &middot; OpenStreetMap/Nominatim &middot; globe.gl / three.js</span>
 </div>
 <div id="globeViz"></div>
 
@@ -223,13 +284,33 @@ function intensityT(frp) {
   return clamp(Math.log1p(frp) / Math.log1p(FRP_SCALE_REF), 0, 1);
 }
 
-// Severity color: 3 discrete buckets (yellow/orange/red), not a computed
-// gradient - cheaper to evaluate per-marker and matches how other fire
-// trackers bucket intensity for a quick glance instead of a precise reading.
+// Severity color: 4 discrete buckets (yellow/orange/red/extreme), not a
+// computed gradient - cheaper to evaluate per-marker and matches how other
+// fire trackers bucket intensity for a quick glance instead of a precise
+// reading. yellow/orange/red are on the log-normalized 0-1 scale
+// (intensityT), but that scale clamps at FRP_SCALE_REF (150 MW) - every
+// fire from "barely 150 MW" up to a 2000+ MW megafire previously rendered
+// as the exact same red, which made genuinely extreme fires visually
+// indistinguishable from ones an order of magnitude weaker. "Extreme" is
+// checked against the raw FRP directly (not the clamped t), using the same
+// 150 MW value the scale already treats as "maximum severity" - about the
+// top 0.4% of fires worldwide right now.
 const SEVERITY_YELLOW = [255, 221, 51];
 const SEVERITY_ORANGE = [255, 140, 20];
 const SEVERITY_RED = [200, 30, 20];
-function severityBucket(t) {
+const SEVERITY_EXTREME = [110, 0, 0]; // dark red - distinctly darker than SEVERITY_RED, not just "more saturated"
+// Dark purple, the way storm-severity weather maps reserve purple for their
+// single worst category above red - reserved for the fires that are
+// essentially fully out of control, a notch past "extreme."
+const SEVERITY_CATASTROPHIC = [74, 0, 92];
+const EXTREME_FRP_THRESHOLD = FRP_SCALE_REF;
+// 3x the "maximum severity" reference point - roughly the top ~0.05% of
+// fires worldwide, reserved for genuine megafires (multi-hundred-MW+).
+const CATASTROPHIC_FRP_THRESHOLD = FRP_SCALE_REF * 3;
+function severityBucket(frp) {
+  if (frp >= CATASTROPHIC_FRP_THRESHOLD) return SEVERITY_CATASTROPHIC;
+  if (frp >= EXTREME_FRP_THRESHOLD) return SEVERITY_EXTREME;
+  const t = intensityT(frp);
   if (t < 1 / 3) return SEVERITY_YELLOW;
   if (t < 2 / 3) return SEVERITY_ORANGE;
   return SEVERITY_RED;
@@ -268,7 +349,7 @@ function makeCircleSpriteTexture() {
 }
 
 const FIRE_SPRITE_ALTITUDE = 0.01;
-const FIRE_SPRITE_SIZE = 1.5; // world units; tune to taste once seen live
+const FIRE_SPRITE_SIZE = 1.0; // world units; 33% smaller than the original 1.5, per request
 
 const fireSpritesGeometry = new THREE.BufferGeometry();
 const fireSpritesMaterial = new THREE.PointsMaterial({
@@ -293,7 +374,7 @@ function updateFireSprites(markers) {
     positions[i * 3] = coords.x;
     positions[i * 3 + 1] = coords.y;
     positions[i * 3 + 2] = coords.z;
-    const [r, g, b] = d.faded ? fadeRgb(severityBucket(intensityT(d.totalFrp))) : severityBucket(intensityT(d.totalFrp));
+    const [r, g, b] = d.faded ? fadeRgb(severityBucket(d.totalFrp)) : severityBucket(d.totalFrp);
     colors[i * 3] = r / 255;
     colors[i * 3 + 1] = g / 255;
     colors[i * 3 + 2] = b / 255;
@@ -384,18 +465,48 @@ const world = Globe()
   .labelLat(d => d.lat)
   .labelLng(d => d.lng)
   .labelText(d => d.name)
-  .labelColor(() => '#ffffff')
+  .labelColor(d => d.color || '#ffffff')
   .labelSize(d => d.size)
   .labelDotRadius(0)
   .labelIncludeDot(false)
   .labelResolution(2)
-  .labelAltitude(0.005)
+  // Raised off the surface the same way the fire markers were (see
+  // FIRE_SPRITE_ALTITUDE) - a label sitting almost flush with the globe
+  // z-fights/hides when viewed face-on and only reads clearly near the
+  // horizon, which read as "labels are more visible at the edge of the
+  // globe than in the middle."
+  .labelAltitude(0.02)
   .labelsTransitionDuration(0);
 
 // Exposed for debugging from outside the module (e.g. driving pointOfView
 // from a test script) - the app script is type="module" now, so top-level
 // bindings like `world` no longer land on window automatically.
 window.world = world;
+
+// Uncapped, THREE defaults to window.devicePixelRatio - on a 2x/3x-DPI
+// display that's up to 9x the actual fragment-shading cost of a capped 2x
+// ratio, for a difference in sharpness that's barely visible on a globe this
+// size. This is one of the biggest single wins for drag/orbit smoothness.
+world.renderer().setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+// three-globe's sphere has a fixed radius of 100 units, and OrbitControls
+// has no minimum zoom distance by default - nothing stops the camera from
+// dollying all the way down to (or past) the surface. A trackpad pinch
+// gesture in particular can zoom several times faster per input event than
+// a mouse wheel notch, and reliably drove the camera to distance ~100.05
+// (pointOfView altitude ~0.0005, i.e. a hair above the surface) in testing -
+// close enough that the near clip plane and the globe mesh itself black out
+// the view entirely. That's the actual cause of "zoom goes black, comes
+// back once I stop" - not a state bug, just an unclamped zoom range.
+// 100.5 (altitude floor ~0.005) is 10x further from the surface than the
+// altitude that actually broke rendering, while still comfortably inside
+// the app's own finest zoom tier (see gridForAltitude, which applies its
+// closest-detail grid at any altitude <= 0.015).
+world.controls().minDistance = 100.5;
+// Generous but not unbounded - keeps a stray zoom-out from flying the
+// camera absurdly far past the default whole-earth framing (altitude 2.2).
+world.controls().maxDistance = 1200;
+
 
 // Groups fires within gridDeg of each other into a single marker, purely to
 // reduce visual clutter - the underlying detections are kept (in `.fires`)
@@ -576,9 +687,117 @@ function currentMinHectares() {
 // got there. Each check below is itself cheap/bucket-gated (see
 // updateCountryLabels), so polling a few times a second costs effectively
 // nothing when nothing's actually changed.
+// Labels are hidden for the ENTIRE duration of any camera motion - manual
+// drag/zoom AND programmatic flyTo alike, since both are driven through the
+// same polled pointOfView() reads - and only rebuilt once the camera has
+// been still for a couple of consecutive polls. Building label text meshes
+// is the most expensive thing redrawn per update, so this removes that cost
+// from every moving frame instead of just drag (an OrbitControls
+// 'start'/'end' listener only sees direct mouse drag, not a Quick
+// Look/search flyTo tween, so it missed exactly the case where a "smooth
+// animation" is now expected too).
+const MOTION_EPS = 0.01;
+const STABLE_TICKS_TO_SHOW_LABELS = 1; // ~200ms of no movement before labels reappear (1 tick of the 200ms poll below)
+let lastMotionPov = null;
+let motionStableTicks = 0;
+let labelsHiddenForMotion = false;
+
+// Zoom (mouse wheel / trackpad pinch) doesn't wait for the next 250ms poll
+// tick to hide labels - it drops them on the very first wheel event of a
+// gesture instead. Continuous zoom input fires far faster than the poll
+// (a trackpad pinch is ~60 events/sec), and label text meshes are expensive
+// enough to redraw that leaving them in for even one un-hidden poll window
+// was enough to make the render loop fall behind and show a black/blank
+// frame until it caught up - reported as "zoom goes black, comes back once
+// I stop." Zooming out never needs the label set anyway (labels only
+// reappear once fully stopped), so there's no risk in hiding eagerly here.
+document.getElementById('globeViz').addEventListener('wheel', () => {
+  motionStableTicks = 0;
+  if (!labelsHiddenForMotion) {
+    labelsHiddenForMotion = true;
+    world.labelsData([]);
+  }
+}, { passive: true });
+
+// Watchdog: three-globe's camera tween can land on NaN lat/lng/altitude
+// under certain conditions (reproduced after clearing a country search -
+// the exact trigger wasn't fully pinned down, but the symptom is a
+// permanent black screen that never self-recovers, since a NaN camera
+// transform means nothing can be projected/rendered). Runs every animation
+// frame, not on the slower 250ms poll below - catching this within a single
+// frame (~16ms) means it's never actually visible as a black flash, versus
+// waiting up to 250ms for the next poll tick to notice.
+function watchForBrokenCamera() {
+  const pov = world.pointOfView();
+  if (!Number.isFinite(pov.lat) || !Number.isFinite(pov.lng) || !Number.isFinite(pov.altitude)) {
+    world.pointOfView({ lat: 20, lng: 0, altitude: 2.2 }, 0);
+    lastMotionPov = null;
+  }
+  requestAnimationFrame(watchForBrokenCamera);
+}
+requestAnimationFrame(watchForBrokenCamera);
+
+// Self-driven camera flight, replacing calls to the built-in
+// world.pointOfView(target, ms) transition. The built-in tween was
+// observed completing instantly (or not visibly animating at all) when
+// triggered from clearCountrySearch() specifically, even after decoupling
+// it from every other state change happening in that same click handler -
+// interpolating lat/lng/altitude by hand and pushing each step through
+// pointOfView(pov, 0) (an immediate set, no tweening machinery involved at
+// all) sidesteps whatever internal quirk was short-circuiting it, and is
+// fully reliable regardless of what else runs in the same tick.
+let flyToToken = 0;
+function flyToPointOfView(target, durationMs) {
+  const myToken = ++flyToToken;
+  const start = world.pointOfView();
+  if (!Number.isFinite(start.lat) || !Number.isFinite(start.lng) || !Number.isFinite(start.altitude)) {
+    world.pointOfView(target, 0);
+    return;
+  }
+  const startTime = performance.now();
+  let dLng = target.lng - start.lng;
+  if (dLng > 180) dLng -= 360;
+  if (dLng < -180) dLng += 360;
+  function step(now) {
+    if (myToken !== flyToToken) return; // superseded by a newer flight
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2; // easeInOutQuad
+    const lat = start.lat + (target.lat - start.lat) * eased;
+    let lng = start.lng + dLng * eased;
+    lng = ((lng + 540) % 360) - 180;
+    const altitude = start.altitude + (target.altitude - start.altitude) * eased;
+    world.pointOfView({ lat, lng, altitude }, 0);
+    if (t < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
 setInterval(() => {
   const pov = world.pointOfView();
-  updateCountryLabels(pov.altitude);
+  if (!Number.isFinite(pov.lat) || !Number.isFinite(pov.lng) || !Number.isFinite(pov.altitude)) return;
+
+  const moved = !lastMotionPov ||
+    Math.abs(pov.lat - lastMotionPov.lat) > MOTION_EPS ||
+    Math.abs(pov.lng - lastMotionPov.lng) > MOTION_EPS ||
+    Math.abs(pov.altitude - lastMotionPov.altitude) > MOTION_EPS;
+  lastMotionPov = { lat: pov.lat, lng: pov.lng, altitude: pov.altitude };
+
+  if (moved) {
+    motionStableTicks = 0;
+    if (!labelsHiddenForMotion) {
+      labelsHiddenForMotion = true;
+      world.labelsData([]);
+    }
+  } else if (labelsHiddenForMotion) {
+    motionStableTicks++;
+    if (motionStableTicks >= STABLE_TICKS_TO_SHOW_LABELS) {
+      labelsHiddenForMotion = false;
+      lastLabelKey = null; // force a rebuild even if the bucketed key looks unchanged
+      updateCountryLabels(pov.altitude);
+    }
+  } else {
+    updateCountryLabels(pov.altitude);
+  }
 
   // Re-cluster (not re-fetch) a country view's already-complete local fire
   // set whenever the camera crosses into a different zoom tier - the world
@@ -593,7 +812,7 @@ setInterval(() => {
       }
     }
   }
-}, 250);
+}, 200);
 
 // Approximate polygon area (shoelace formula on raw lon/lat) - only used to
 // rank ring sizes, not for precise measurement.
@@ -738,8 +957,49 @@ function labelPointFor(feature) {
 }
 
 let COUNTRY_LIST = [];
+
+// Significant bodies of water only - oceans, major seas/bays/gulfs, and a
+// handful of the largest rivers. Deliberately excludes straits/channels
+// (e.g. the English Channel) - those read as minor geographic trivia, not
+// something worth a permanent label. `altitude` here plays the same role as
+// a country's framing altitude: how far out the camera can be and still
+// have this label "qualify" (see LABEL_VISIBILITY_FACTOR below) - oceans
+// are visible from nearly any zoom, seas/bays from a moderate distance,
+// rivers only once reasonably zoomed in.
+const WATER_LABEL_COLOR = '#8ecbe8';
+const WATER_BODIES = [
+  { name: 'Pacific Ocean', lat: 0, lng: -160, altitude: 2.6 },
+  { name: 'Atlantic Ocean', lat: 0, lng: -30, altitude: 2.4 },
+  { name: 'Indian Ocean', lat: -20, lng: 80, altitude: 2.3 },
+  { name: 'Southern Ocean', lat: -65, lng: 0, altitude: 2.2 },
+  { name: 'Arctic Ocean', lat: 85, lng: 0, altitude: 2.0 },
+  { name: 'Mediterranean Sea', lat: 35, lng: 18, altitude: 1.1 },
+  { name: 'Caribbean Sea', lat: 15, lng: -75, altitude: 1.1 },
+  { name: 'Gulf of Mexico', lat: 25, lng: -90, altitude: 1.0 },
+  { name: 'Hudson Bay', lat: 60, lng: -85, altitude: 1.0 },
+  { name: 'Bay of Bengal', lat: 15, lng: 88, altitude: 1.0 },
+  { name: 'Red Sea', lat: 20, lng: 38, altitude: 0.9 },
+  { name: 'Black Sea', lat: 43, lng: 35, altitude: 0.9 },
+  { name: 'Caspian Sea', lat: 42, lng: 51, altitude: 0.9 },
+  { name: 'Sea of Japan', lat: 40, lng: 135, altitude: 0.9 },
+  { name: 'South China Sea', lat: 12, lng: 114, altitude: 1.0 },
+  { name: 'Persian Gulf', lat: 27, lng: 51, altitude: 0.7 },
+  { name: 'Bering Sea', lat: 58, lng: -178, altitude: 1.0 },
+  { name: 'Sea of Okhotsk', lat: 55, lng: 150, altitude: 0.9 },
+  { name: 'Arabian Sea', lat: 15, lng: 65, altitude: 1.0 },
+  { name: 'Baltic Sea', lat: 58, lng: 20, altitude: 0.7 },
+  { name: 'North Sea', lat: 56, lng: 3, altitude: 0.7 },
+  { name: 'Amazon River', lat: -3, lng: -60, altitude: 0.5 },
+  { name: 'Nile River', lat: 20, lng: 32, altitude: 0.5 },
+  { name: 'Mississippi River', lat: 32, lng: -91, altitude: 0.45 },
+  { name: 'Yangtze River', lat: 30, lng: 112, altitude: 0.45 },
+  { name: 'Congo River', lat: -1, lng: 18, altitude: 0.45 },
+  { name: 'Ganges River', lat: 25, lng: 85, altitude: 0.4 },
+].map(w => ({ ...w, labelLat: w.lat, labelLng: w.lng, color: WATER_LABEL_COLOR }));
+
 const countrySearch = document.getElementById('countrySearch');
 const countryResults = document.getElementById('countryResults');
+const countrySearchClear = document.getElementById('countrySearchClear');
 
 async function loadCountryBorders() {
   const topo = await (await fetch('https://unpkg.com/world-atlas@2/countries-110m.json')).json();
@@ -785,11 +1045,23 @@ loadCountryBorders();
 // viewport, using the camera's look-at point. Gated on a coarse altitude +
 // look-at bucket so it only rebuilds the label set on a meaningful camera
 // change, not every frame of a drag.
-const LABEL_VISIBILITY_FACTOR = 4;
-const COUNTRY_LABEL_CAP = 60; // safety cap; keeps the largest/most prominent nearby countries if more would qualify
+// Raised from 4 - labels were only appearing once zoomed in much closer than
+// they should've been ("a lot of countries have names that should be
+// appearing but are not"). A bigger factor means a label qualifies at a
+// HIGHER altitude (further zoomed out), i.e. a lower effective zoom
+// requirement.
+const LABEL_VISIBILITY_FACTOR = 6;
+const COUNTRY_LABEL_CAP = 45; // safety cap; keeps the largest/most prominent nearby countries if more would qualify
 let lastLabelKey = null;
 
+// Building label geometry (country + water body names) competes with the
+// initial fire render for main-thread time if it happens right away -
+// deferred until the first fire load finishes so startup shows fires first,
+// labels a beat later, instead of both fighting for the same frame.
+let initialFiresLoaded = false;
+
 function updateCountryLabels(altitude) {
+  if (!initialFiresLoaded) return;
   const pov = world.pointOfView();
   const key = `${Math.round(altitude * 20)}|${Math.round(pov.lat / 2)}|${Math.round(pov.lng / 2)}`;
   if (key === lastLabelKey) return;
@@ -801,10 +1073,18 @@ function updateCountryLabels(altitude) {
   // for "is this roughly in view," and a country's own size is added as
   // slack so a large country's label doesn't vanish just because its
   // centroid sits slightly outside the strict radius while the country
-  // itself still spans into view.
-  const visibleRadiusDeg = clamp(altitude * 90, 6, 180);
+  // itself still spans into view. Capped at 100, not 180 - a sphere only
+  // ever shows one hemisphere (~90 deg from the look-at point) to the
+  // camera no matter how zoomed out; the old 180 cap let every label on the
+  // ENTIRE globe, including the far side facing directly away from the
+  // camera, qualify as "in view" and get built/rendered every time, wasted
+  // work for labels that were never visible in the first place.
+  const visibleRadiusDeg = clamp(altitude * 90, 6, 100);
 
-  const visible = COUNTRY_LIST
+  // Countries and water bodies share the exact same qualification logic
+  // (framing-altitude cutoff + viewport proximity) and compete for the same
+  // label cap - a label is a label, regardless of what it's naming.
+  const visible = COUNTRY_LIST.concat(WATER_BODIES)
     .filter(c => altitude <= c.altitude * LABEL_VISIBILITY_FACTOR)
     .filter(c => {
       const dLat = pov.lat - c.lat;
@@ -817,6 +1097,7 @@ function updateCountryLabels(altitude) {
       lat: c.labelLat,
       lng: c.labelLng,
       name: c.name,
+      color: c.color,
       // Labels are 3D billboards anchored to the globe surface, so getting
       // closer already makes them look bigger on screen via perspective -
       // this needs to shrink WITH altitude (not against it) or a label
@@ -838,7 +1119,12 @@ function renderCountryResults(query) {
       const btn = document.createElement('button');
       btn.textContent = c.name;
       btn.addEventListener('click', async () => {
-        world.pointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
+        // Selecting a result fills the box with the chosen country and
+        // closes the dropdown, instead of leaving the search box empty and
+        // the stale results list still open.
+        countrySearch.value = c.name;
+        countryResults.innerHTML = '';
+        flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
         const fires = await loadCountryFires(c);
         if (predictionToggle.checked) {
           runCountryPredictions(c, fires);
@@ -848,18 +1134,46 @@ function renderCountryResults(query) {
     });
 }
 
+// Search and predictions are linked: clearing one clears the other, since a
+// prediction only ever exists for the currently-searched country.
+function clearCountrySearch() {
+  countrySearch.value = '';
+  countryResults.innerHTML = '';
+  countrySearchClear.style.display = 'none';
+  // Back to the current world-wide "Fires shown" setting rather than
+  // staying stuck on whatever country was last searched.
+  lastPredictedCountry = null;
+  lastPredictedFires = null;
+  inCountryView = false;
+  clearPredictions();
+  // Flies back out to the default whole-earth framing instead of leaving
+  // the camera zoomed in on whatever country was just cleared - a smooth
+  // tween, not an instant jump (see flyToPointOfView - the built-in
+  // world.pointOfView(target, ms) transition wasn't reliably animating from
+  // this specific call site). loadFires() (a full world-wide re-cluster +
+  // sprite rebuild) is deliberately delayed until the flight's own duration
+  // has elapsed instead of firing immediately alongside it, so the heavy
+  // data rebuild doesn't compete with the animation for the same frames.
+  const CLEAR_FLY_MS = 900;
+  flyToPointOfView({ lat: 20, lng: 0, altitude: 2.2 }, CLEAR_FLY_MS);
+  statusEl.textContent = 'Loading fire data...';
+  statusSubEl.textContent = '';
+  setTimeout(loadFires, CLEAR_FLY_MS);
+}
+
 countrySearch.addEventListener('input', () => {
   const query = countrySearch.value.trim();
+  countrySearchClear.style.display = query ? 'block' : 'none';
   renderCountryResults(query);
   if (!query) {
-    // Back to the current world-wide "Fires shown" setting rather than
-    // staying stuck on whatever country was last searched.
     lastPredictedCountry = null;
     lastPredictedFires = null;
     inCountryView = false;
     loadFires();
   }
 });
+
+countrySearchClear.addEventListener('click', clearCountrySearch);
 
 // --- Fire spread predictions: projected location N days out (gated by the Prediction toggle, run on country search) ---
 const predictionToggle = document.getElementById('predictionToggle');
@@ -1029,6 +1343,8 @@ function clusterConfidenceFactor(cluster) {
 }
 
 function clearPredictions() {
+  predictionRunId++; // invalidate any runCountryPredictions() still in flight
+  predictionAbortController?.abort(); // and actually stop its in-flight fetches, not just ignore their result
   predictionArcs = [];
   updateArcsLayer();
   predictionPaths = [];
@@ -1055,7 +1371,7 @@ function clearPredictions() {
 // one - matching by identity and filling `null` for anything unresolved
 // keeps every point's position in the final array meaningful (downstream
 // code already treats a null entry as "skip this one").
-async function fetchElevationInChunks(points, perGroup, groupsPerChunk) {
+async function fetchElevationInChunks(points, perGroup, groupsPerChunk, signal) {
   const chunkSize = perGroup * groupsPerChunk;
   const chunks = [];
   for (let i = 0; i < points.length; i += chunkSize) {
@@ -1069,6 +1385,7 @@ async function fetchElevationInChunks(points, perGroup, groupsPerChunk) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(chunk),
+        signal,
       });
       if (!res.ok) return chunk.map(() => null);
       const json = await res.json();
@@ -1096,6 +1413,21 @@ function makePredictedMarker(c, dest, hours, windSpeedKmh) {
   };
 }
 
+// Guards against a stale prediction run clobbering fresh state - clicking
+// the search-clear X (or starting a new country search) while a prediction's
+// wind/elevation fetches are still in flight used to let this function's
+// LATER-resolving code overwrite lastClusters/the fire sprite buffer with
+// stale country data after the user had already moved on, which could leave
+// the render in a broken state. clearPredictions() bumps predictionRunId,
+// invalidating any run that hasn't reached its final write yet, AND aborts
+// its in-flight fetches outright - a superseded run used to keep hammering
+// Open-Meteo (a 7-day hourly-wind prediction is many chunked requests) even
+// after its result was worthless, right at the exact moment a full world
+// reload was ALSO kicking off. That pile-up of simultaneous network/CPU work
+// is the likely cause of the reported black-screen freeze after clicking X.
+let predictionRunId = 0;
+let predictionAbortController = null;
+
 async function runCountryPredictions(country, fires) {
   lastPredictedCountry = country;
   lastPredictedFires = fires;
@@ -1103,6 +1435,13 @@ async function runCountryPredictions(country, fires) {
   const strength = predictionStrength();
 
   clearPredictions();
+  // Captured AFTER this call's own clearPredictions() (which bumps the
+  // counter to invalidate anything still in flight from before) - otherwise
+  // this run would immediately invalidate itself.
+  const runId = ++predictionRunId;
+  const abortController = new AbortController();
+  predictionAbortController = abortController;
+  const signal = abortController.signal;
   predictionPanel.style.display = 'block';
 
   if (fires.length === 0) {
@@ -1178,6 +1517,7 @@ async function runCountryPredictions(country, fires) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cellEntries.map(([, c]) => ({ lat: c.lat, lng: c.lng }))),
+        signal,
       });
       if (res.ok) {
         const json = await res.json();
@@ -1196,6 +1536,7 @@ async function runCountryPredictions(country, fires) {
       newArcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng, color: '#ffffff', animated: false });
     });
 
+    if (runId !== predictionRunId) return; // superseded - don't resurrect cleared arcs
     predictionArcs = newArcs;
     updateArcsLayer();
   } else {
@@ -1207,6 +1548,7 @@ async function runCountryPredictions(country, fires) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ points: cellEntries.map(([, c]) => ({ lat: c.lat, lng: c.lng })), hours }),
+        signal,
       });
       if (res.ok) {
         const json = await res.json();
@@ -1238,7 +1580,7 @@ async function runCountryPredictions(country, fires) {
       // cells than that (each cell contributes 2 points) - so this goes out
       // in chunks of 40 pairs (80 points) rather than one big request.
       const ELEVATION_CHUNK_CELLS = 40;
-      const elevationResults = await fetchElevationInChunks(probePoints, 2, ELEVATION_CHUNK_CELLS);
+      const elevationResults = await fetchElevationInChunks(probePoints, 2, ELEVATION_CHUNK_CELLS, signal);
       probeCellKeys.forEach((key, i) => {
         const origin = elevationResults[i * 2];
         const probe = elevationResults[i * 2 + 1];
@@ -1291,7 +1633,7 @@ async function runCountryPredictions(country, fires) {
       // 5 points/cell instead of stage 3's 2, so the chunk size drops to
       // keep each request around the same ~80-point budget.
       const ELEVATION_CHUNK_CELLS = 16;
-      const elevationResults = await fetchElevationInChunks(probePoints, 5, ELEVATION_CHUNK_CELLS);
+      const elevationResults = await fetchElevationInChunks(probePoints, 5, ELEVATION_CHUNK_CELLS, signal);
       probeCellKeys.forEach((key, i) => {
         const base = i * 5;
         const [origin, north, east, south, west] = elevationResults.slice(base, base + 5);
@@ -1372,10 +1714,12 @@ async function runCountryPredictions(country, fires) {
       newPaths.push({ points });
     });
 
+    if (runId !== predictionRunId) return; // superseded - don't resurrect cleared arcs/paths
     world.pathsData(newPaths);
     predictionPaths = newPaths;
   }
 
+  if (runId !== predictionRunId) return; // superseded - don't clobber current state with stale results
   updateFireSprites([...lastClusters, ...predictedMarkers]);
 
   const projectedCount = strength === 1 ? newArcs.length : newPaths.length;
@@ -1384,17 +1728,18 @@ async function runCountryPredictions(country, fires) {
     <p>Projected ${hours}hr position for ${projectedCount} of ${targets.length} marker(s)</p>
   `;
   } catch (err) {
-    predictionInfo.innerHTML = `<p>Prediction failed: ${err.message}</p>`;
+    // AbortError means this run was deliberately cancelled (superseded by a
+    // clear/new search) - not a real failure, and by definition stale, so it
+    // shouldn't touch the DOM at all.
+    if (err.name !== 'AbortError' && runId === predictionRunId) {
+      predictionInfo.innerHTML = `<p>Prediction failed: ${err.message}</p>`;
+    }
   } finally {
     clearInterval(progressIntervalId);
   }
 }
 
-clearPredictionsBtn.addEventListener('click', () => {
-  lastPredictedCountry = null;
-  lastPredictedFires = null;
-  clearPredictions();
-});
+clearPredictionsBtn.addEventListener('click', clearCountrySearch);
 
 predictionToggle.addEventListener('change', () => {
   if (!predictionToggle.checked) {
@@ -1447,13 +1792,22 @@ const FIRE_ESTIMATE_GRID = 0.05;
 const statusSubEl = document.getElementById('statusSub');
 let fireEstimateRequestId = 0;
 
-async function updateFireCountEstimate(minFrpParam) {
+// The number people actually read as "how many fires are burning" needs to
+// be the deduplicated estimate, not the raw satellite/ground row count -
+// FIRMS' 3 satellites each re-detect the same hotspot over their ~2-day
+// window, so the raw count overstates fire activity by roughly 3x on its
+// own, before ground-sourced rows (already deduped against satellite on the
+// backend) are even added in. This clusters at roughly one fire complex's
+// footprint (~5.5km, independent of the display slider - "Sparse" mode's
+// huge cells would badly undercount) and becomes the PRIMARY number shown;
+// the untouched raw count moves to the secondary line as a technical detail.
+async function updateFireCountEstimate(paramsStr) {
   const requestId = ++fireEstimateRequestId;
   try {
-    const res = await fetch(`/api/fires?grid=${FIRE_ESTIMATE_GRID}${minFrpParam}`);
+    const res = await fetch(`/api/fires?grid=${FIRE_ESTIMATE_GRID}${paramsStr}`);
     const json = await res.json();
     if (!res.ok || requestId !== fireEstimateRequestId) return;
-    statusSubEl.textContent = `~${json.count.toLocaleString()} estimated distinct fires (nearby detections merged)`;
+    statusEl.textContent = `~${json.count.toLocaleString()} active fires worldwide`;
   } catch (err) {
     // Leave whatever estimate was already showing rather than clearing it on a blip.
   }
@@ -1467,14 +1821,16 @@ async function loadFires() {
   const minFrpParam = minFrp !== null ? `&min_frp=${minFrp}` : '';
   const minConfidenceParam = minConfidence !== null ? `&min_confidence=${minConfidence}` : '';
   const minHectaresParam = minHectares !== null ? `&min_hectares=${minHectares}` : '';
+  const filterParams = minFrpParam + minConfidenceParam + minHectaresParam;
+
   statusEl.textContent = 'Loading fire data...';
-  updateFireCountEstimate(minFrpParam + minConfidenceParam + minHectaresParam);
+  updateFireCountEstimate(filterParams);
   try {
-    const res = await fetch(`/api/fires?grid=${gridDeg}${minFrpParam}${minConfidenceParam}${minHectaresParam}`);
+    const res = await fetch(`/api/fires?grid=${gridDeg}${filterParams}`);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
     renderPreClusteredMarkers(json.fires);
-    statusEl.textContent = `${json.raw_count} active fire detections worldwide`;
+    statusSubEl.textContent = `${json.raw_count.toLocaleString()} raw satellite/ground detections (re-detections not yet merged)`;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
@@ -1498,19 +1854,79 @@ minorGroundFiresToggle.addEventListener('change', () => {
 
 // --- "Am I in danger?" address check ---
 const addressInput = document.getElementById('addressInput');
+const addressInputClear = document.getElementById('addressInputClear');
 const addressCheckBtn = document.getElementById('addressCheckBtn');
 const addressResult = document.getElementById('addressResult');
 const addressRiskBadge = document.getElementById('addressRiskBadge');
 const addressLocationLine = document.getElementById('addressLocationLine');
 const addressProximityLine = document.getElementById('addressProximityLine');
-const addressPathLine = document.getElementById('addressPathLine');
+
+addressInput.addEventListener('input', () => {
+  addressInputClear.style.display = addressInput.value ? 'block' : 'none';
+});
+
+// Clears the input, the home marker on the globe, and whatever risk info
+// was showing - same "X clears everything about this search" pattern as
+// the country search box.
+function clearAddressCheck() {
+  addressInput.value = '';
+  addressInputClear.style.display = 'none';
+  clearHomeMarker();
+  addressResult.style.display = 'none';
+  addressRiskBadge.className = '';
+  addressRiskBadge.textContent = '';
+  addressLocationLine.textContent = '';
+  addressProximityLine.textContent = '';
+}
+addressInputClear.addEventListener('click', clearAddressCheck);
 
 const ADDRESS_CHECK_RADIUS_DEG = 3; // ~300-330km half-width bbox around the address
 const ADDRESS_CHECK_HOURS = 24; // fixed, independent of the country-prediction sliders
 const ADDRESS_MAX_PREDICTION_TARGETS = 15; // closest N clusters get a wind lookup, not every one
-const ADDRESS_DANGER_KM = 15;
-const ADDRESS_WATCH_KM = 50;
+// Fires/predicted positions beyond this are ignored entirely, regardless of
+// severity - "check within a 50km gap for various fires." Widened slightly
+// past the original 50km so it doesn't clip catastrophic's 70km watch
+// radius (the tier that most needs to be seen from farther away).
+const ADDRESS_SEARCH_RADIUS_KM = 75;
+// Distance thresholds by severity tier. Yellow is deliberately ABSENT (not
+// just a huge radius) - a yellow fire never counts toward risk at any
+// distance, full stop; it's real but not significant enough to alert over.
+// More severe tiers get bigger radii since bigger fires spread faster and
+// give less useful warning if you only look up close. orange/red numbers
+// came directly from a specific ask; extreme's are a judgment call (not
+// given explicitly) since it's a new tier - tune freely.
+// Radius grows with severity in both directions (danger AND watch) - a
+// bigger, more intense fire is a threat from farther away, full stop. Not
+// monotonic by accident: an earlier pass had red's radius smaller than
+// orange's, which was backwards.
+const RISK_THRESHOLDS_KM = {
+  orange: { danger: 5, watch: 20 },
+  red: { danger: 8, watch: 30 },
+  extreme: { danger: 12, watch: 45 },
+  catastrophic: { danger: 20, watch: 70 },
+};
 const CONFIDENCE_LABELS = { h: 'high confidence', n: 'moderate confidence', l: 'low confidence' };
+
+// Same tier boundaries as the map's severityBucket/EXTREME_FRP_THRESHOLD -
+// "dangerous" is defined by the same severity a person would see as a
+// marker color on the map, not a separate scale invented just for this.
+function severityTierName(frp) {
+  if (frp >= CATASTROPHIC_FRP_THRESHOLD) return 'catastrophic';
+  if (frp >= EXTREME_FRP_THRESHOLD) return 'extreme';
+  const t = intensityT(frp);
+  if (t < 1 / 3) return 'yellow';
+  if (t < 2 / 3) return 'orange';
+  return 'red';
+}
+
+function riskLevelFor(frp, distanceKm) {
+  if (distanceKm > ADDRESS_SEARCH_RADIUS_KM) return null;
+  const thresholds = RISK_THRESHOLDS_KM[severityTierName(frp)];
+  if (!thresholds) return null; // yellow - never counts, no matter how close
+  if (distanceKm <= thresholds.danger) return 'danger';
+  if (distanceKm <= thresholds.watch) return 'watch';
+  return null;
+}
 
 // acq_time is "HHMM" UTC (e.g. "1932" = 19:32 UTC) - how long ago a
 // detection actually happened, used so a risk result says WHY it's
@@ -1558,11 +1974,38 @@ async function checkAddressRisk() {
     // changes what counts as a risk trigger for this specific check).
     const nearbyFires = allNearbyFires.filter(f => f.confidence !== 'l' && f.confidence !== 'low');
 
-    let nearestFire = null;
-    let nearestFireKm = Infinity;
+    // Tracks the single WORST candidate across every current fire and every
+    // predicted position - "check within a 50km gap for various fires, and
+    // report the most severe one, that fire will determine the info." Not
+    // "nearest fire" and "nearest predicted position" as two separate
+    // numbers - one candidate wins outright, ranked by danger > watch, tied
+    // candidates broken by whichever is closer.
+    const RISK_RANK = { danger: 2, watch: 1 };
+    let worstRank = 0;
+    let worstLevel = null;
+    let worstDistanceKm = null;
+    let worstFrp = null;
+    let worstSource = null; // the raw fire or cluster this result came from
+    let worstIsPredicted = false;
+    let worstEtaHours = null;
+
+    function considerCandidate(source, frp, distanceKm, isPredicted, etaHours) {
+      const level = riskLevelFor(frp, distanceKm);
+      if (!level) return;
+      const rank = RISK_RANK[level];
+      if (rank > worstRank || (rank === worstRank && distanceKm < worstDistanceKm)) {
+        worstRank = rank;
+        worstLevel = level;
+        worstDistanceKm = distanceKm;
+        worstFrp = frp;
+        worstSource = source;
+        worstIsPredicted = isPredicted;
+        worstEtaHours = etaHours;
+      }
+    }
+
     nearbyFires.forEach(f => {
-      const d = haversineKm(lat, lng, f.lat, f.lng);
-      if (d < nearestFireKm) { nearestFireKm = d; nearestFire = f; }
+      considerCandidate(f, f.frp, haversineKm(lat, lng, f.lat, f.lng), false, null);
     });
 
     // Predicts where the closest nearby fires will be in ADDRESS_CHECK_HOURS
@@ -1570,7 +2013,6 @@ async function checkAddressRisk() {
     // prediction's "1: Basic" strength uses, deliberately NOT the slower
     // elevation-based tiers, so this stays fast (a few seconds) regardless
     // of whatever the main Prediction strength slider is set to.
-    let nearestPredictedKm = Infinity;
     if (nearbyFires.length > 0) {
       const clusters = clusterFires(nearbyFires, 0.2)
         .slice()
@@ -1591,20 +2033,13 @@ async function checkAddressRisk() {
           const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, ADDRESS_CHECK_HOURS);
           const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
           const d = haversineKm(lat, lng, dest.lat, dest.lng);
-          if (d < nearestPredictedKm) nearestPredictedKm = d;
+          considerCandidate(c, c.totalFrp, d, true, ADDRESS_CHECK_HOURS);
         });
       }
     }
 
-    const minKm = Math.min(nearestFireKm, nearestPredictedKm);
-    let riskClass, riskLabel;
-    if (minKm <= ADDRESS_DANGER_KM) {
-      riskClass = 'risk-danger'; riskLabel = 'DANGER';
-    } else if (minKm <= ADDRESS_WATCH_KM) {
-      riskClass = 'risk-watch'; riskLabel = 'WATCH';
-    } else {
-      riskClass = 'risk-safe'; riskLabel = 'SAFE';
-    }
+    const riskClass = worstLevel === 'danger' ? 'risk-danger' : worstLevel === 'watch' ? 'risk-watch' : 'risk-safe';
+    const riskLabel = worstLevel === 'danger' ? 'DANGER' : worstLevel === 'watch' ? 'WATCH' : 'SAFE';
 
     addressRiskBadge.className = riskClass;
     addressRiskBadge.textContent = riskLabel;
@@ -1613,21 +2048,27 @@ async function checkAddressRisk() {
     // data is displayed - only shown when that fallback actually fired,
     // since the primary (Open-Meteo) path has no such requirement.
     addressLocationLine.textContent += source === 'nominatim' ? ' (via OpenStreetMap)' : '';
-    addressProximityLine.textContent = nearestFire
-      ? `Nearest active fire: ${nearestFireKm.toFixed(0)} km away ` +
-        `(${CONFIDENCE_LABELS[nearestFire.confidence] || nearestFire.confidence}, ` +
-        `detected ${fireAgeHours(nearestFire).toFixed(0)}h ago)`
-      : 'No confirmed active fires detected nearby';
-    addressPathLine.textContent = Number.isFinite(nearestPredictedKm)
-      ? `Closest predicted ${ADDRESS_CHECK_HOURS}hr position: ${nearestPredictedKm.toFixed(0)} km away`
-      : '';
+
+    if (worstSource) {
+      const tierLabel = severityTierName(worstFrp).replace(/^./, c => c.toUpperCase());
+      if (worstIsPredicted) {
+        addressProximityLine.textContent =
+          `${tierLabel} fire predicted to reach ${worstDistanceKm.toFixed(0)} km away in ~${worstEtaHours}h`;
+      } else {
+        addressProximityLine.textContent =
+          `${tierLabel} fire: ${worstDistanceKm.toFixed(0)} km away ` +
+          `(${CONFIDENCE_LABELS[worstSource.confidence] || worstSource.confidence}, ` +
+          `detected ${fireAgeHours(worstSource).toFixed(0)}h ago)`;
+      }
+    } else {
+      addressProximityLine.textContent = `No fires severe enough to be a concern within ${ADDRESS_SEARCH_RADIUS_KM} km`;
+    }
     addressResult.style.display = 'block';
   } catch (err) {
     addressRiskBadge.className = '';
     addressRiskBadge.textContent = '';
     addressLocationLine.textContent = 'Error: ' + err.message;
     addressProximityLine.textContent = '';
-    addressPathLine.textContent = '';
     addressResult.style.display = 'block';
   } finally {
     addressCheckBtn.disabled = false;
@@ -1640,7 +2081,10 @@ addressInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') checkAddressRisk();
 });
 
-loadFires();
+loadFires().finally(() => {
+  document.getElementById('loadingOverlay').style.display = 'none';
+  initialFiresLoaded = true;
+});
 </script>
 </body>
 </html>

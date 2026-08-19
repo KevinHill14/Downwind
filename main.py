@@ -712,7 +712,10 @@ async def geocode(q: str = Query(..., min_length=1, description="free-text place
 
     try:
         async with httpx.AsyncClient(timeout=10, headers=NOMINATIM_HEADERS) as client:
-            resp = await client.get(NOMINATIM_URL, params={"q": q, "format": "jsonv2", "limit": 1})
+            resp = await client.get(
+                NOMINATIM_URL,
+                params={"q": q, "format": "jsonv2", "limit": 1, "addressdetails": 1},
+            )
             resp.raise_for_status()
         nominatim_results = resp.json()
     except httpx.HTTPError:
@@ -722,12 +725,21 @@ async def geocode(q: str = Query(..., min_length=1, description="free-text place
         raise HTTPException(status_code=404, detail=f"Couldn't find a location matching '{q}'")
 
     top = nominatim_results[0]
+    # display_name is Nominatim's full address string (house number through
+    # postcode, 8-10 comma-separated parts for a precise street address) -
+    # useful for disambiguation, unusable as a UI label. jsonv2's structured
+    # `address` object lets us build a short "street, city" style name
+    # instead, the same shape Open-Meteo already returns for its results.
+    addr = top.get("address") or {}
+    street = " ".join(p for p in (addr.get("house_number"), addr.get("road")) if p)
+    locality = addr.get("city") or addr.get("town") or addr.get("village") or addr.get("suburb")
+    short_name = ", ".join(p for p in (street, locality) if p) or top.get("display_name", q)
     return {
         "lat": float(top["lat"]),
         "lng": float(top["lon"]),
-        "name": top.get("display_name", q),
-        "admin1": None,
-        "country": None,
+        "name": short_name,
+        "admin1": addr.get("state"),
+        "country": addr.get("country"),
         "source": "nominatim",
     }
 
