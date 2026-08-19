@@ -498,7 +498,13 @@ async def get_wind_batch(points: list[WindPoint]):
                 resp = await client.get(WIND_URL, params=params)
                 resp.raise_for_status()
             data = resp.json()
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            # Was silently swallowed with no trace of what actually failed -
+            # a 200 OK in the access log told us nothing about whether this
+            # outbound call to Open-Meteo even succeeded. Printed so it shows
+            # up in the host's logs (e.g. Render) when the wind overlay/
+            # predictions come back empty in production.
+            print(f"[wind/batch] Open-Meteo request failed: {type(e).__name__}: {e}")
             continue
         if isinstance(data, dict):  # Open-Meteo returns a plain object for a single point
             data = [data]
@@ -590,7 +596,8 @@ async def get_wind_forecast_batch(req: ForecastRequest):
                 resp = await client.get(WIND_URL, params=params)
                 resp.raise_for_status()
             data = resp.json()
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            print(f"[wind/forecast/batch] Open-Meteo request failed: {type(e).__name__}: {e}")
             data = []
         if isinstance(data, dict):
             data = [data]
