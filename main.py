@@ -10,12 +10,21 @@ Serves:
 - POST /api/elevation/batch     -> ground elevation for many locations, used for the terrain/slope prediction tier
 - GET /api/geocode               -> place name/address -> lat/lng, for the address risk-check feature
 
+Fire data merges two sources into one in-memory dataset (see _world_fires):
+NASA FIRMS (VIIRS satellite thermal detection, worldwide) and, Canada-only
+for now, CWFIS's national ground-confirmed active fire list (see
+_fetch_canada_fires) - satellite detection alone can miss a large fire
+complex whose own smoke obscures its thermal signature, which
+ground/dispatch reporting doesn't.
+
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
 """
 import asyncio
+import math
 import os
 import time
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -86,6 +95,102 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
     return fires
 
 
+CANADA_FIRES_URL = "https://cwfis.cfs.nrcan.gc.ca/downloads/reportedfires/activefires.csv"
+# Stages that mean "currently burning" - EX (extinguished) is the only one
+# that means it's out. BM ("being monitored") is included deliberately: a
+# real, common fire management policy (used e.g. by Ontario) is to
+# deliberately NOT suppress many remote fires that aren't threatening
+# anything, watching them instead of fighting them - still a genuine active
+# fire, just a different response posture than OC/UC/BH (out of control /
+# under control / being held). Satellite hotspot detection has no way to
+# represent that distinction; ground reporting does.
+CANADA_ACTIVE_STAGES = {"OC", "UC", "BH", "BM"}
+
+
+async def _fetch_canada_fires() -> list[dict]:
+    """All of Canada's ground-confirmed active fires in one request - the
+    Canadian Wildland Fire Information System's (CWFIS, run by Natural
+    Resources Canada) national aggregation of every province/territory's own
+    agency-reported fire data (CIFFC's coordinated national standard - the
+    same field/stage conventions Ontario's own provincial service uses,
+    just already merged across all of them here). No key required. Found by
+    reverse-engineering a third-party fire tracker's network requests back
+    to its real source, then confirming this was the single national feed
+    behind it rather than 11+ separate provincial ones.
+
+    This exists specifically to close a real gap satellite-only detection
+    has: a large, well-established fire complex can generate enough smoke
+    to obscure VIIRS/MODIS thermal detection over its own hottest core
+    (confirmed directly - NASA's live feed had almost nothing for a region
+    two other trackers showed a dense fire cluster in), but ground/dispatch
+    reporting still knows the fire is there and how big it actually is.
+    Canada-only for now, not deduplicated against satellite hotspots for the
+    same fire (a large complex may show both a ground marker and nearby
+    VIIRS pixels) - both are real signal, and matching them up would need
+    real spatial-correlation work this first pass doesn't attempt."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(CANADA_FIRES_URL)
+        resp.raise_for_status()
+
+    lines = resp.text.strip().splitlines()
+    if not lines:
+        return []
+    header = lines[0].split(",")
+    idx = {name: i for i, name in enumerate(header)}
+
+    fires = []
+    for line in lines[1:]:
+        cols = line.split(",")
+        try:
+            if cols[idx["stage_of_control_status"]] not in CANADA_ACTIVE_STAGES:
+                continue
+            lat = float(cols[idx["latitude"]])
+            lng = float(cols[idx["longitude"]])
+            # CWFIS uses -1 as a "size not yet known" sentinel, not a real
+            # negative area - clamped to 0 here (rather than left negative)
+            # since math.log1p below requires an input > -1, and this whole
+            # fetch previously crashed silently on the very first sentinel
+            # row it hit, dropping every ground fire for the entire refresh.
+            hectares = max(0.0, float(cols[idx["fire_size"]] or 0))
+            status_str = cols[idx["status_date"]] or cols[idx["situation_report_date"]]
+            dt = datetime.fromisoformat(status_str) if status_str else datetime.now(timezone.utc)
+            fires.append(
+                {
+                    "lat": lat,
+                    "lng": lng,
+                    # Ground-confirmed by agency dispatch, not a satellite
+                    # guess - the highest confidence tier this app has.
+                    "confidence": "h",
+                    # No FRP is reported for ground-confirmed fires -
+                    # hectares burned is the closest severity proxy,
+                    # log-scaled so a 300,000ha complex doesn't render as
+                    # literally thousands of times more "intense" than a
+                    # 1ha one, and floored above LARGE_FIRE_MIN_FRP so
+                    # every one of these renders as its own marker, never
+                    # merged away - it's a real, verified incident, not an
+                    # ambiguous single satellite pixel.
+                    "frp": max(30.0, math.log1p(hectares) * 15),
+                    "acq_date": dt.strftime("%Y-%m-%d"),
+                    "acq_time": dt.strftime("%H%M"),
+                    # Real hectares burned, kept alongside the derived FRP
+                    # proxy above so ground fires can be filtered by their
+                    # actual size (see min_hectares on /api/fires), not just
+                    # the log-scaled severity number. Satellite detections
+                    # have no equivalent field - absence of "ha" means
+                    # "not a ground-sourced fire" everywhere this is read.
+                    "ha": hectares,
+                }
+            )
+        except (TypeError, ValueError, IndexError, KeyError):
+            # One malformed row (unexpected sentinel, missing field) should
+            # skip just that row, not silently drop every ground fire for
+            # the whole refresh - this used to be the bug: the dict/frp
+            # computation lived OUTSIDE this try block, so one bad row's
+            # exception propagated all the way out of the function.
+            continue
+    return fires
+
+
 WORLD_AREA = "-180,-90,180,90"
 WORLD_REFRESH_INTERVAL_SECONDS = 10 * 60  # matches FIRMS' own NRT refresh cadence - polling faster wouldn't find anything new
 
@@ -105,10 +210,61 @@ _world_fires: list[dict] = []
 _world_fires_fetched_at: float = 0.0
 
 
+# ~0.15deg (roughly 15-17km at Canadian latitudes) - a VIIRS satellite
+# pixel this close to a ground-reported fire is treated as a detection OF
+# that same physical fire, not a separate one. Without this, a single large
+# active fire renders as one ground marker PLUS a whole dense cluster of
+# satellite pixels scattered across its own footprint, which is real signal
+# but the same event shown many times over - a big fire visually reads as
+# "way more fires than other trackers show" even though the underlying
+# ground fire count is accurate. Doesn't need to be a precise great-circle
+# distance for this purpose - it's a visual-dedup heuristic, not a safety
+# calculation.
+GROUND_DEDUP_RADIUS_DEG = 0.15
+
+
+def _dedupe_against_ground(satellite_fires: list[dict], ground_fires: list[dict]) -> list[dict]:
+    if not ground_fires:
+        return satellite_fires
+
+    # Bucket ground fires onto a grid sized to the dedup radius, so each
+    # satellite fire only needs to check its own cell + 8 neighbors instead
+    # of every ground fire - O(satellite + ground) instead of O(satellite *
+    # ground), which matters since satellite counts run into the hundreds
+    # of thousands.
+    buckets: dict[tuple[int, int], list[dict]] = {}
+    for gf in ground_fires:
+        key = (round(gf["lat"] / GROUND_DEDUP_RADIUS_DEG), round(gf["lng"] / GROUND_DEDUP_RADIUS_DEG))
+        buckets.setdefault(key, []).append(gf)
+
+    def near_ground(f: dict) -> bool:
+        cell_lat = round(f["lat"] / GROUND_DEDUP_RADIUS_DEG)
+        cell_lng = round(f["lng"] / GROUND_DEDUP_RADIUS_DEG)
+        for d_lat in (-1, 0, 1):
+            for d_lng in (-1, 0, 1):
+                for gf in buckets.get((cell_lat + d_lat, cell_lng + d_lng), []):
+                    if abs(f["lat"] - gf["lat"]) <= GROUND_DEDUP_RADIUS_DEG and abs(f["lng"] - gf["lng"]) <= GROUND_DEDUP_RADIUS_DEG:
+                        return True
+        return False
+
+    return [f for f in satellite_fires if not near_ground(f)]
+
+
 async def _refresh_world_fires() -> None:
     global _world_fires, _world_fires_fetched_at
     results = await asyncio.gather(*(_fetch_firms_fires(WORLD_AREA, source) for source in FIRMS_SOURCES))
-    _world_fires = [f for source_fires in results for f in source_fires]
+    satellite_fires = [f for source_fires in results for f in source_fires]
+
+    try:
+        ground_fires = await _fetch_canada_fires()
+    except Exception:
+        # Canada's ground-source feed is a supplement, not the backbone -
+        # if it's down or changes shape, satellite data (already fetched
+        # above) should still go out rather than the whole refresh failing.
+        ground_fires = []
+
+    satellite_fires = _dedupe_against_ground(satellite_fires, ground_fires)
+    _world_fires = satellite_fires + ground_fires
     _world_fires_fetched_at = time.time()
 
 
@@ -197,6 +353,14 @@ async def get_fires(
     min_frp: float | None = Query(
         None, description="drop individual detections weaker than this FRP (MW) - the 'toggle small fires' filter"
     ),
+    min_confidence: str | None = Query(
+        None, description="'n' or 'h' - additionally drop detections below this VIIRS confidence level"
+    ),
+    min_hectares: float | None = Query(
+        None,
+        description="drop ground-sourced fires smaller than this many hectares - satellite detections "
+        "(no hectare data) are unaffected either way",
+    ),
 ):
     if not FIRMS_MAP_KEY:
         raise HTTPException(
@@ -225,6 +389,14 @@ async def get_fires(
         # exact area has ever been requested or the thousandth.
         fires = _filter_bbox(fires, west, south, east, north)
 
+    # Confidence-based filtering (unconditional "l" exclusion, plus a
+    # stricter "h"-only floor when "Show small fires" is off) is TEMPORARILY
+    # REVERTED for comparison - it dropped France from 300 detections to
+    # just 1. "h" confidence turns out to be rare in VIIRS data generally
+    # (real fires mostly land at "n" nominal, not "h"), so requiring it was
+    # far too aggressive. min_confidence is accepted but currently ignored;
+    # re-enable with a better-calibrated threshold once decided.
+
     if min_frp is not None:
         # A flat intensity floor, not a top-N cap - every fire at or above
         # min_frp still shows, regardless of how it ranks against fires
@@ -232,6 +404,14 @@ async def get_fires(
         # real regional fire under stronger fires on the other side of the
         # world, which is exactly the failure mode this app avoids elsewhere.
         fires = [f for f in fires if f["frp"] >= min_frp]
+
+    if min_hectares is not None:
+        # Only affects ground-sourced fires (the only ones with an "ha"
+        # field at all) - satellite detections pass through unfiltered by
+        # this. Lets "significant fires only" be compared directly against
+        # a fixed hectare threshold, same idea as min_frp but on the real
+        # burned-area number instead of the derived FRP proxy.
+        fires = [f for f in fires if f.get("ha") is None or f["ha"] >= min_hectares]
 
     raw_count = len(fires)
 

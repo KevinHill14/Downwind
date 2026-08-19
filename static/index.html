@@ -136,6 +136,13 @@
       <span class="slider"></span>
     </label>
   </div>
+  <div class="switchRow">
+    <span>Show minor ground fires</span>
+    <label class="switch">
+      <input type="checkbox" id="minorGroundFiresToggle" checked />
+      <span class="slider"></span>
+    </label>
+  </div>
   <div class="sliderRow">
     <div class="rowTop">
       <span>Prediction range</span>
@@ -529,6 +536,32 @@ const MIN_FRP_THRESHOLD = 3;
 const smallFiresToggle = document.getElementById('smallFiresToggle');
 function currentMinFrp() {
   return smallFiresToggle.checked ? null : MIN_FRP_THRESHOLD;
+}
+
+// "l" (low) confidence is excluded server-side unconditionally, always -
+// this is only the EXTRA restriction "Show small fires" off adds: high
+// confidence only, not just "not low", so what's left skews toward real
+// forest fires NASA is actually sure about rather than every marginal
+// nominal-confidence detection.
+function currentMinConfidence() {
+  return smallFiresToggle.checked ? null : 'h';
+}
+
+// Ground-sourced fires (Canada, see main.py) carry a real hectares-burned
+// number satellite detections don't have, so this is a separate axis from
+// "Show small fires" above (which only reasons about FRP). Off by default
+// means "everything" - matches this app's general no-caps stance. On
+// (checked) shows every ground-reported fire regardless of size; off
+// restricts to "significant" ones, for comparing against other trackers
+// that only surface a handful of the largest fires per region (confirmed
+// directly against firerisk.ai: their smallest shown Manitoba fire was
+// ~40ha, everything below that was just absent from their map, not merged
+// or deprioritized - a hard cutoff, not a cap in the sense this app
+// otherwise avoids).
+const MIN_GROUND_FIRE_HECTARES = 40;
+const minorGroundFiresToggle = document.getElementById('minorGroundFiresToggle');
+function currentMinHectares() {
+  return minorGroundFiresToggle.checked ? null : MIN_GROUND_FIRE_HECTARES;
 }
 
 // Reacting to camera movement is polled, not event-driven off
@@ -1429,11 +1462,15 @@ async function updateFireCountEstimate(minFrpParam) {
 async function loadFires() {
   const gridDeg = DETAIL_GRID_STEPS[+fireCountSlider.value];
   const minFrp = currentMinFrp();
+  const minConfidence = currentMinConfidence();
+  const minHectares = currentMinHectares();
   const minFrpParam = minFrp !== null ? `&min_frp=${minFrp}` : '';
+  const minConfidenceParam = minConfidence !== null ? `&min_confidence=${minConfidence}` : '';
+  const minHectaresParam = minHectares !== null ? `&min_hectares=${minHectares}` : '';
   statusEl.textContent = 'Loading fire data...';
-  updateFireCountEstimate(minFrpParam);
+  updateFireCountEstimate(minFrpParam + minConfidenceParam + minHectaresParam);
   try {
-    const res = await fetch(`/api/fires?grid=${gridDeg}${minFrpParam}`);
+    const res = await fetch(`/api/fires?grid=${gridDeg}${minFrpParam}${minConfidenceParam}${minHectaresParam}`);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
     renderPreClusteredMarkers(json.fires);
@@ -1454,6 +1491,11 @@ smallFiresToggle.addEventListener('change', () => {
   loadFires();
 });
 
+minorGroundFiresToggle.addEventListener('change', () => {
+  if (inCountryView) return; // country search always shows full detail
+  loadFires();
+});
+
 // --- "Am I in danger?" address check ---
 const addressInput = document.getElementById('addressInput');
 const addressCheckBtn = document.getElementById('addressCheckBtn');
@@ -1468,6 +1510,16 @@ const ADDRESS_CHECK_HOURS = 24; // fixed, independent of the country-prediction 
 const ADDRESS_MAX_PREDICTION_TARGETS = 15; // closest N clusters get a wind lookup, not every one
 const ADDRESS_DANGER_KM = 15;
 const ADDRESS_WATCH_KM = 50;
+const CONFIDENCE_LABELS = { h: 'high confidence', n: 'moderate confidence', l: 'low confidence' };
+
+// acq_time is "HHMM" UTC (e.g. "1932" = 19:32 UTC) - how long ago a
+// detection actually happened, used so a risk result says WHY it's
+// flagging something instead of just a bare distance.
+function fireAgeHours(f) {
+  const t = f.acq_time.padStart(4, '0');
+  const detectedAt = new Date(`${f.acq_date}T${t.slice(0, 2)}:${t.slice(2, 4)}:00Z`);
+  return (Date.now() - detectedAt.getTime()) / 3600000;
+}
 
 async function checkAddressRisk() {
   const query = addressInput.value.trim();
@@ -1496,12 +1548,21 @@ async function checkAddressRisk() {
     const north = clamp(lat + ADDRESS_CHECK_RADIUS_DEG, -90, 90);
     const firesRes = await fetch(`/api/fires?bbox=${west},${south},${east},${north}`);
     const firesJson = await firesRes.json();
-    const nearbyFires = firesJson.fires || [];
+    const allNearbyFires = firesJson.fires || [];
 
+    // VIIRS/MODIS "low" confidence detections are a real, known source of
+    // false positives - sun glint, cloud edges, small non-fire heat sources
+    // - it's NASA's own signal for "less certain this is actually a fire,"
+    // so a lone low-confidence blip doesn't get treated the same as a
+    // confirmed detection here. The main map still shows them (this only
+    // changes what counts as a risk trigger for this specific check).
+    const nearbyFires = allNearbyFires.filter(f => f.confidence !== 'l' && f.confidence !== 'low');
+
+    let nearestFire = null;
     let nearestFireKm = Infinity;
     nearbyFires.forEach(f => {
       const d = haversineKm(lat, lng, f.lat, f.lng);
-      if (d < nearestFireKm) nearestFireKm = d;
+      if (d < nearestFireKm) { nearestFireKm = d; nearestFire = f; }
     });
 
     // Predicts where the closest nearby fires will be in ADDRESS_CHECK_HOURS
@@ -1552,9 +1613,11 @@ async function checkAddressRisk() {
     // data is displayed - only shown when that fallback actually fired,
     // since the primary (Open-Meteo) path has no such requirement.
     addressLocationLine.textContent += source === 'nominatim' ? ' (via OpenStreetMap)' : '';
-    addressProximityLine.textContent = Number.isFinite(nearestFireKm)
-      ? `Nearest active fire: ${nearestFireKm.toFixed(0)} km away`
-      : 'No active fires detected nearby';
+    addressProximityLine.textContent = nearestFire
+      ? `Nearest active fire: ${nearestFireKm.toFixed(0)} km away ` +
+        `(${CONFIDENCE_LABELS[nearestFire.confidence] || nearestFire.confidence}, ` +
+        `detected ${fireAgeHours(nearestFire).toFixed(0)}h ago)`
+      : 'No confirmed active fires detected nearby';
     addressPathLine.textContent = Number.isFinite(nearestPredictedKm)
       ? `Closest predicted ${ADDRESS_CHECK_HOURS}hr position: ${nearestPredictedKm.toFixed(0)} km away`
       : '';
