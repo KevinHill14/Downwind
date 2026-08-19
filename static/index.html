@@ -11,6 +11,12 @@
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 16px;
     border-radius: 8px; font-size: 13px;
   }
+  #statusSub {
+    position: absolute; top: 54px; left: 16px; z-index: 10;
+    background: rgba(20,20,20,0.85); color: #999; padding: 6px 16px;
+    border-radius: 8px; font-size: 11.5px;
+  }
+  #statusSub:empty { display: none; }
   #optimizePanel {
     position: absolute; top: 16px; right: 16px; z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 14px;
@@ -83,10 +89,38 @@
     border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
   }
   #predictionPanel button:hover { background: #555; }
+
+  #addressPanel {
+    position: absolute; bottom: 16px; right: 16px; z-index: 10;
+    background: rgba(20,20,20,0.9); color: #eee; padding: 12px 16px;
+    border-radius: 8px; font-size: 13px; max-width: 300px;
+  }
+  #addressPanel h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
+  #addressInput {
+    width: 100%; box-sizing: border-box; background: #1a1a1a; color: #eee;
+    border: 1px solid #444; border-radius: 6px; padding: 8px 10px; font-size: 13px;
+  }
+  #addressInput:focus { border-color: #e25822; outline: none; }
+  #addressCheckBtn {
+    margin-top: 6px; width: 100%; background: #e25822; color: #fff; border: none;
+    border-radius: 6px; padding: 8px 12px; font-size: 13px; cursor: pointer; font-weight: 600;
+  }
+  #addressCheckBtn:hover { background: #c94a1a; }
+  #addressCheckBtn:disabled { background: #555; cursor: default; }
+  #addressResult { margin-top: 10px; display: none; }
+  #addressResult p { margin: 3px 0; color: #ccc; }
+  #addressRiskBadge {
+    display: inline-block; padding: 4px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.02em; margin-bottom: 6px;
+  }
+  #addressRiskBadge.risk-safe { background: #2a5c2a; color: #a6e6a6; }
+  #addressRiskBadge.risk-watch { background: #6b5a1e; color: #ffd97a; }
+  #addressRiskBadge.risk-danger { background: #6b1e1e; color: #ff9a9a; }
 </style>
 </head>
 <body>
 <div id="status">Loading fire data...</div>
+<div id="statusSub"></div>
 <div id="optimizePanel">
   <div class="switchRow">
     <span>Prediction</span>
@@ -141,6 +175,17 @@
   <h3>Fire spread predictions</h3>
   <div id="predictionInfo"></div>
   <button id="clearPredictions">Clear</button>
+</div>
+<div id="addressPanel">
+  <h3>Am I in danger?</h3>
+  <input type="text" id="addressInput" placeholder="Enter an address or place..." autocomplete="off" />
+  <button id="addressCheckBtn">Check</button>
+  <div id="addressResult">
+    <span id="addressRiskBadge"></span>
+    <p id="addressLocationLine"></p>
+    <p id="addressProximityLine"></p>
+    <p id="addressPathLine"></p>
+  </div>
 </div>
 <div id="globeViz"></div>
 
@@ -251,16 +296,47 @@ function updateFireSprites(markers) {
   fireSpritesGeometry.computeBoundingSphere();
 }
 
+// The "Am I in danger?" address marker - same sprite technique as the fire
+// cloud (one texture, one point), just its own tiny 0-or-1-point buffer and
+// a distinct color, so it doesn't get mixed up with fire severity coloring.
+const HOME_MARKER_ALTITUDE = 0.012;
+const HOME_MARKER_SIZE = 2.5;
+const HOME_MARKER_COLOR = [80, 170, 255]; // blue - unambiguously "not a fire"
+const homeMarkerGeometry = new THREE.BufferGeometry();
+const homeMarkerMaterial = new THREE.PointsMaterial({
+  map: makeCircleSpriteTexture(),
+  size: HOME_MARKER_SIZE,
+  sizeAttenuation: true,
+  vertexColors: true,
+  transparent: true,
+  alphaTest: 0.05,
+  depthWrite: false,
+});
+const homeMarkerObject = new THREE.Points(homeMarkerGeometry, homeMarkerMaterial);
+
+function updateHomeMarker(lat, lng) {
+  const coords = world.getCoords(lat, lng, HOME_MARKER_ALTITUDE);
+  const [r, g, b] = HOME_MARKER_COLOR;
+  homeMarkerGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([coords.x, coords.y, coords.z]), 3));
+  homeMarkerGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array([r / 255, g / 255, b / 255]), 3));
+  homeMarkerGeometry.computeBoundingSphere();
+}
+
+function clearHomeMarker() {
+  homeMarkerGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+  homeMarkerGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(0), 3));
+}
+
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
-  // Fire markers are NOT a globe.gl points layer - see updateFireSprites()
-  // above. A single custom-object datum hosts the whole sprite cloud so
-  // it's parented/positioned correctly under the globe, but its buffers are
-  // filled and refreshed by updateFireSprites(), not by globe.gl's own
-  // per-datum reactive update path.
-  .customLayerData([{}])
-  .customThreeObject(() => fireSpritesObject)
+  // Fire markers AND the home marker are NOT globe.gl points layers - see
+  // updateFireSprites()/updateHomeMarker() above. Two custom-object data
+  // entries host both sprite clouds so each is parented/positioned
+  // correctly under the globe, but their buffers are filled directly, not
+  // through globe.gl's own per-datum reactive update path.
+  .customLayerData([{ obj: fireSpritesObject }, { obj: homeMarkerObject }])
+  .customThreeObject(d => d.obj)
   .customThreeObjectUpdate(() => {})
   .polygonCapColor(() => 'rgba(0,0,0,0)')
   .polygonSideColor(() => 'rgba(0,0,0,0)')
@@ -334,15 +410,33 @@ function gridForAltitude(altitude) {
   return 0.003; // ~330m - close to VIIRS' own ~375m pixel size, i.e. near-individual detections
 }
 
+// A fire at or above this (~the orange/red color boundary - see
+// severityBucket/intensityT above, t=2/3 works out to ~27.4 MW, the top
+// ~8-10% most intense fires worldwide) renders as its own marker and skips
+// grid grouping entirely - a genuinely major fire can't get visually
+// diluted or hidden by nearby small ones just because they land in the
+// same cell. A lower cutoff (the orange/yellow boundary, ~4.3 MW) was tried
+// first and rejected - that's below the MEDIAN fire's intensity, so it
+// "protected" over 60% of all fires and made clustering barely reduce
+// marker count at all. Keep in sync with LARGE_FIRE_MIN_FRP in main.py.
+const LARGE_FIRE_MIN_FRP = 27.4;
+
 function clusterFires(fires, gridDeg) {
+  const largeFires = fires.filter(f => f.frp >= LARGE_FIRE_MIN_FRP);
+  const smallFires = fires.filter(f => f.frp < LARGE_FIRE_MIN_FRP);
+
+  const clusters = largeFires.map(f => ({
+    lat: f.lat, lng: f.lng, count: 1, totalFrp: f.frp, maxFrp: f.frp, fires: [f],
+  }));
+
   const groups = new Map();
-  fires.forEach(f => {
+  smallFires.forEach(f => {
     const key = `${Math.round(f.lat / gridDeg)},${Math.round(f.lng / gridDeg)}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(f);
   });
 
-  return [...groups.values()].map(group => {
+  groups.forEach(group => {
     const totalFrp = group.reduce((sum, f) => sum + f.frp, 0);
     const maxFrp = Math.max(...group.map(f => f.frp));
     // FRP-weighted centroid, so the marker sits nearer the most intense
@@ -350,8 +444,10 @@ function clusterFires(fires, gridDeg) {
     const weight = totalFrp || group.length;
     const lat = group.reduce((sum, f) => sum + f.lat * (f.frp || 1), 0) / weight;
     const lng = group.reduce((sum, f) => sum + f.lng * (f.frp || 1), 0) / weight;
-    return { lat, lng, count: group.length, totalFrp, maxFrp, fires: group };
+    clusters.push({ lat, lng, count: group.length, totalFrp, maxFrp, fires: group });
   });
+
+  return clusters;
 }
 
 let predictionArcs = [];
@@ -797,6 +893,7 @@ predictionStrengthSlider.addEventListener('change', () => {
 // searched country).
 async function loadCountryFires(country) {
   inCountryView = true;
+  statusSubEl.textContent = ''; // worldwide-only estimate, not meaningful for a single country
   statusEl.textContent = `Loading fires for ${country.name}...`;
   const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
   try {
@@ -824,6 +921,18 @@ async function loadCountryFires(country) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     return [];
   }
+}
+
+// Great-circle distance between two points, in km (haversine). Used by the
+// address risk check to find how far an address is from the nearest fire /
+// predicted fire position.
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 // Great-circle destination point, `distanceKm` from (lat, lng) along
@@ -897,29 +1006,47 @@ function clearPredictions() {
 }
 
 // Fetches elevation for `points` (grouped in fixed-size chunks of `perGroup`
-// points each, `groupsPerChunk` groups per request) sequentially, so a
-// single elevation request never exceeds Open-Meteo's ~100-point limit.
-// Failed chunks fall back to nulls (matched positionally) rather than
-// aborting the whole prediction.
+// points each, `groupsPerChunk` groups per request), so a single elevation
+// request never exceeds Open-Meteo's ~100-point limit. Chunks fire in
+// PARALLEL (Promise.all), not one-at-a-time - Open-Meteo's elevation
+// endpoint takes ~12-14s per 80-point chunk, and a strength-3+ prediction
+// for a country with many fire clusters easily needs 2+ chunks; awaiting
+// them sequentially meant 25s+ before anything showed up, which read as
+// "broken" even though it would eventually finish.
+//
+// Each chunk's results are matched back to its own points by lat/lng, not
+// by array position - the backend only returns entries for points it
+// actually resolved, so a chunk response can be shorter than the chunk sent
+// (a bad/oceanic point, a transient failure). Matching by position after
+// that would silently pair the WRONG elevation with a point, not just drop
+// one - matching by identity and filling `null` for anything unresolved
+// keeps every point's position in the final array meaningful (downstream
+// code already treats a null entry as "skip this one").
 async function fetchElevationInChunks(points, perGroup, groupsPerChunk) {
-  const results = [];
   const chunkSize = perGroup * groupsPerChunk;
+  const chunks = [];
   for (let i = 0; i < points.length; i += chunkSize) {
     const chunk = points.slice(i, i + chunkSize);
-    if (chunk.length === 0) continue;
-    const res = await fetch('/api/elevation/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(chunk),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      results.push(...json.results);
-    } else {
-      results.push(...chunk.map(() => null));
-    }
+    if (chunk.length > 0) chunks.push(chunk);
   }
-  return results;
+
+  const chunkResults = await Promise.all(chunks.map(async chunk => {
+    try {
+      const res = await fetch('/api/elevation/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(chunk),
+      });
+      if (!res.ok) return chunk.map(() => null);
+      const json = await res.json();
+      const byPoint = new Map(json.results.map(r => [`${r.lat},${r.lng}`, r]));
+      return chunk.map(p => byPoint.get(`${p.lat},${p.lng}`) ?? null);
+    } catch (err) {
+      return chunk.map(() => null);
+    }
+  }));
+
+  return chunkResults.flat();
 }
 
 function makePredictedMarker(c, dest, hours, windSpeedKmh) {
@@ -959,6 +1086,20 @@ async function runCountryPredictions(country, fires) {
     .slice(0, MAX_PREDICTIONS);
 
   predictionInfo.innerHTML = `<p>Projecting ${hours}hr fire locations for ${targets.length} marker(s) in ${country.name}...</p>`;
+  // Open-Meteo's response time for the wind/elevation lookups varies a lot
+  // by region and load - anywhere from ~4s to 20s+ for the same request
+  // shape, observed directly. A static "Projecting..." message with no
+  // feedback for that whole window reads as frozen, not slow - this ticks
+  // a live elapsed-seconds counter so it's visibly still working. Cleared
+  // in the `finally` block below regardless of how the function exits.
+  const predictionStartedAt = Date.now();
+  const progressIntervalId = setInterval(() => {
+    const elapsedSec = Math.floor((Date.now() - predictionStartedAt) / 1000);
+    const p = predictionInfo.querySelector('p');
+    if (p) p.textContent = `Projecting ${hours}hr fire locations for ${targets.length} marker(s) in ${country.name}... (${elapsedSec}s)`;
+  }, 1000);
+
+  try {
 
   // Wind barely varies over ~30km, so markers are grouped onto a coarse grid
   // and share one wind lookup per cell. All cells are fetched in a single
@@ -973,6 +1114,24 @@ async function runCountryPredictions(country, fires) {
   });
   const cellEntries = [...cellCenters.entries()];
 
+  // Matches a /api/wind[/forecast]/batch response back to cell keys by the
+  // lat/lng each result actually carries, not by array position - the
+  // backend drops individual points that fail (a bad Open-Meteo entry, a
+  // transient chunk error) rather than padding them out, so a response can
+  // legitimately be shorter than the request. Matching by position after a
+  // drop silently attributes one cell's wind reading to a DIFFERENT cell -
+  // wrong, not just incomplete.
+  function matchResultsToCells(results) {
+    const pointToCellKey = new Map();
+    cellEntries.forEach(([key, c]) => pointToCellKey.set(`${c.lat},${c.lng}`, key));
+    const byCell = new Map();
+    results.forEach(r => {
+      const key = pointToCellKey.get(`${r.lat},${r.lng}`);
+      if (key) byCell.set(key, r);
+    });
+    return byCell;
+  }
+
   const predictedMarkers = [];
   const newArcs = [];
   const newPaths = [];
@@ -980,7 +1139,7 @@ async function runCountryPredictions(country, fires) {
   if (strength === 1) {
     // Stage 1: one current-conditions wind snapshot, straight projection -
     // the original model.
-    const windByCell = new Map();
+    let windByCell = new Map();
     if (cellEntries.length > 0) {
       const res = await fetch('/api/wind/batch', {
         method: 'POST',
@@ -989,7 +1148,7 @@ async function runCountryPredictions(country, fires) {
       });
       if (res.ok) {
         const json = await res.json();
-        json.results.forEach((wind, i) => windByCell.set(cellEntries[i][0], wind));
+        windByCell = matchResultsToCells(json.results);
       }
     }
 
@@ -1009,7 +1168,7 @@ async function runCountryPredictions(country, fires) {
   } else {
     // Stage 2+: hourly wind forecast instead of one static snapshot, stepped
     // every 6 hours so the path bends as the wind shifts over the window.
-    const forecastByCell = new Map();
+    let forecastByCell = new Map();
     if (cellEntries.length > 0) {
       const res = await fetch('/api/wind/forecast/batch', {
         method: 'POST',
@@ -1018,7 +1177,8 @@ async function runCountryPredictions(country, fires) {
       });
       if (res.ok) {
         const json = await res.json();
-        json.results.forEach((f, i) => forecastByCell.set(cellEntries[i][0], f.steps));
+        const matched = matchResultsToCells(json.results);
+        matched.forEach((f, key) => forecastByCell.set(key, f.steps));
       }
     }
 
@@ -1190,6 +1350,11 @@ async function runCountryPredictions(country, fires) {
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
     <p>Projected ${hours}hr position for ${projectedCount} of ${targets.length} marker(s)</p>
   `;
+  } catch (err) {
+    predictionInfo.innerHTML = `<p>Prediction failed: ${err.message}</p>`;
+  } finally {
+    clearInterval(progressIntervalId);
+  }
 }
 
 clearPredictionsBtn.addEventListener('click', () => {
@@ -1238,11 +1403,35 @@ const FIRE_COUNT_LABELS = ['Sparse', 'Coarse', 'Medium', 'Fine', 'Finer', 'Fines
 const fireCountSlider = document.getElementById('fireCountSlider');
 const fireCountLabel = document.getElementById('fireCountLabel');
 
+// Raw detection count (what statusEl shows) is satellite pixel hits, not
+// distinct fires - a single wildfire spans many adjacent pixels, and 3
+// satellites each re-detect the same hotspot over the 2-day window. This is
+// a second, independent estimate: cluster at roughly one fire complex's
+// footprint (~5.5km, not tied to the display slider - "Sparse" mode's huge
+// cells would badly undercount) and report the resulting cluster count.
+// Runs as its own fire-and-forget fetch so it never blocks the main render.
+const FIRE_ESTIMATE_GRID = 0.05;
+const statusSubEl = document.getElementById('statusSub');
+let fireEstimateRequestId = 0;
+
+async function updateFireCountEstimate(minFrpParam) {
+  const requestId = ++fireEstimateRequestId;
+  try {
+    const res = await fetch(`/api/fires?grid=${FIRE_ESTIMATE_GRID}${minFrpParam}`);
+    const json = await res.json();
+    if (!res.ok || requestId !== fireEstimateRequestId) return;
+    statusSubEl.textContent = `~${json.count.toLocaleString()} estimated distinct fires (nearby detections merged)`;
+  } catch (err) {
+    // Leave whatever estimate was already showing rather than clearing it on a blip.
+  }
+}
+
 async function loadFires() {
   const gridDeg = DETAIL_GRID_STEPS[+fireCountSlider.value];
   const minFrp = currentMinFrp();
   const minFrpParam = minFrp !== null ? `&min_frp=${minFrp}` : '';
   statusEl.textContent = 'Loading fire data...';
+  updateFireCountEstimate(minFrpParam);
   try {
     const res = await fetch(`/api/fires?grid=${gridDeg}${minFrpParam}`);
     const json = await res.json();
@@ -1263,6 +1452,129 @@ fireCountSlider.addEventListener('change', loadFires);
 smallFiresToggle.addEventListener('change', () => {
   if (inCountryView) return; // country search always shows full detail
   loadFires();
+});
+
+// --- "Am I in danger?" address check ---
+const addressInput = document.getElementById('addressInput');
+const addressCheckBtn = document.getElementById('addressCheckBtn');
+const addressResult = document.getElementById('addressResult');
+const addressRiskBadge = document.getElementById('addressRiskBadge');
+const addressLocationLine = document.getElementById('addressLocationLine');
+const addressProximityLine = document.getElementById('addressProximityLine');
+const addressPathLine = document.getElementById('addressPathLine');
+
+const ADDRESS_CHECK_RADIUS_DEG = 3; // ~300-330km half-width bbox around the address
+const ADDRESS_CHECK_HOURS = 24; // fixed, independent of the country-prediction sliders
+const ADDRESS_MAX_PREDICTION_TARGETS = 15; // closest N clusters get a wind lookup, not every one
+const ADDRESS_DANGER_KM = 15;
+const ADDRESS_WATCH_KM = 50;
+
+async function checkAddressRisk() {
+  const query = addressInput.value.trim();
+  if (!query) return;
+
+  addressCheckBtn.disabled = true;
+  addressCheckBtn.textContent = 'Checking...';
+  addressResult.style.display = 'none';
+  clearHomeMarker();
+
+  try {
+    const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
+    const geoJson = await geoRes.json();
+    if (!geoRes.ok) throw new Error(geoJson.detail || 'Location not found');
+    const { lat, lng, name, admin1, country, source } = geoJson;
+
+    world.pointOfView({ lat, lng, altitude: 0.3 }, 1200);
+    updateHomeMarker(lat, lng);
+
+    // Nothing here respects the "Show small fires" toggle - that's a
+    // display-declutter choice for the main map, not something that should
+    // ever hide a real fire from a safety check.
+    const west = clamp(lng - ADDRESS_CHECK_RADIUS_DEG, -180, 180);
+    const east = clamp(lng + ADDRESS_CHECK_RADIUS_DEG, -180, 180);
+    const south = clamp(lat - ADDRESS_CHECK_RADIUS_DEG, -90, 90);
+    const north = clamp(lat + ADDRESS_CHECK_RADIUS_DEG, -90, 90);
+    const firesRes = await fetch(`/api/fires?bbox=${west},${south},${east},${north}`);
+    const firesJson = await firesRes.json();
+    const nearbyFires = firesJson.fires || [];
+
+    let nearestFireKm = Infinity;
+    nearbyFires.forEach(f => {
+      const d = haversineKm(lat, lng, f.lat, f.lng);
+      if (d < nearestFireKm) nearestFireKm = d;
+    });
+
+    // Predicts where the closest nearby fires will be in ADDRESS_CHECK_HOURS
+    // using a plain current-wind snapshot - the same method the country
+    // prediction's "1: Basic" strength uses, deliberately NOT the slower
+    // elevation-based tiers, so this stays fast (a few seconds) regardless
+    // of whatever the main Prediction strength slider is set to.
+    let nearestPredictedKm = Infinity;
+    if (nearbyFires.length > 0) {
+      const clusters = clusterFires(nearbyFires, 0.2)
+        .slice()
+        .sort((a, b) => haversineKm(lat, lng, a.lat, a.lng) - haversineKm(lat, lng, b.lat, b.lng))
+        .slice(0, ADDRESS_MAX_PREDICTION_TARGETS);
+
+      const windRes = await fetch('/api/wind/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clusters.map(c => ({ lat: c.lat, lng: c.lng }))),
+      });
+      if (windRes.ok) {
+        const windJson = await windRes.json();
+        const windByPoint = new Map(windJson.results.map(w => [`${w.lat},${w.lng}`, w]));
+        clusters.forEach(c => {
+          const wind = windByPoint.get(`${c.lat},${c.lng}`);
+          if (!wind) return;
+          const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, ADDRESS_CHECK_HOURS);
+          const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
+          const d = haversineKm(lat, lng, dest.lat, dest.lng);
+          if (d < nearestPredictedKm) nearestPredictedKm = d;
+        });
+      }
+    }
+
+    const minKm = Math.min(nearestFireKm, nearestPredictedKm);
+    let riskClass, riskLabel;
+    if (minKm <= ADDRESS_DANGER_KM) {
+      riskClass = 'risk-danger'; riskLabel = 'DANGER';
+    } else if (minKm <= ADDRESS_WATCH_KM) {
+      riskClass = 'risk-watch'; riskLabel = 'WATCH';
+    } else {
+      riskClass = 'risk-safe'; riskLabel = 'SAFE';
+    }
+
+    addressRiskBadge.className = riskClass;
+    addressRiskBadge.textContent = riskLabel;
+    addressLocationLine.textContent = [name, admin1, country].filter(Boolean).join(', ');
+    // Nominatim's usage policy requires attributing OpenStreetMap when its
+    // data is displayed - only shown when that fallback actually fired,
+    // since the primary (Open-Meteo) path has no such requirement.
+    addressLocationLine.textContent += source === 'nominatim' ? ' (via OpenStreetMap)' : '';
+    addressProximityLine.textContent = Number.isFinite(nearestFireKm)
+      ? `Nearest active fire: ${nearestFireKm.toFixed(0)} km away`
+      : 'No active fires detected nearby';
+    addressPathLine.textContent = Number.isFinite(nearestPredictedKm)
+      ? `Closest predicted ${ADDRESS_CHECK_HOURS}hr position: ${nearestPredictedKm.toFixed(0)} km away`
+      : '';
+    addressResult.style.display = 'block';
+  } catch (err) {
+    addressRiskBadge.className = '';
+    addressRiskBadge.textContent = '';
+    addressLocationLine.textContent = 'Error: ' + err.message;
+    addressProximityLine.textContent = '';
+    addressPathLine.textContent = '';
+    addressResult.style.display = 'block';
+  } finally {
+    addressCheckBtn.disabled = false;
+    addressCheckBtn.textContent = 'Check';
+  }
+}
+
+addressCheckBtn.addEventListener('click', checkAddressRisk);
+addressInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') checkAddressRisk();
 });
 
 loadFires();

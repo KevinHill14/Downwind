@@ -8,6 +8,7 @@ Serves:
 - POST /api/wind/batch          -> wind for many locations in a single Open-Meteo request
 - POST /api/wind/forecast/batch -> hourly wind + humidity forecast for many locations, for the higher prediction-strength tiers
 - POST /api/elevation/batch     -> ground elevation for many locations, used for the terrain/slope prediction tier
+- GET /api/geocode               -> place name/address -> lat/lng, for the address risk-check feature
 
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
@@ -135,19 +136,43 @@ def _filter_bbox(fires: list[dict], west: float, south: float, east: float, nort
     return [f for f in fires if west <= f["lng"] <= east and south <= f["lat"] <= north]
 
 
+# Roughly the orange/red color boundary the frontend uses (see
+# intensityT/FRP_SCALE_REF in static/index.html - t=2/3 on that log scale
+# works out to ~27.4 MW, the top ~8-10% most intense fires worldwide). A
+# fire at or above this renders as its own marker, never folded into a grid
+# cell with weaker neighbors - a genuinely major fire can't get visually
+# diluted or hidden by nearby small ones just because they share a cell.
+# A lower cutoff (e.g. the orange/yellow boundary, ~4.3 MW) was tried first
+# and rejected: that's below the MEDIAN fire's intensity, so it protected
+# over 60% of all fires from clustering and took world-view load time from
+# ~500ms back up to 7+ seconds, undoing earlier clustering performance work
+# for basically no gain (most of what it "protected" wasn't actually a
+# stand-out fire). Keep this in sync with the frontend's severity thresholds
+# if FRP_SCALE_REF or the color bucket cutoffs change.
+LARGE_FIRE_MIN_FRP = 27.4
+
+
 def _cluster_fires(fires: list[dict], grid_deg: float) -> list[dict]:
     """Groups fires within grid_deg of each other into one FRP-weighted
     centroid marker - the same aggregation static/index.html's clusterFires()
     does client-side, but run here so a dense area's response is a few
     hundred/thousand aggregate points instead of tens of thousands of raw
     ones. Every fire still contributes fully to its cell's totals - nothing
-    is dropped or deprioritized, unlike a top-N cap."""
+    is dropped or deprioritized, unlike a top-N cap. Fires at or above
+    LARGE_FIRE_MIN_FRP skip grouping entirely (see its docstring above)."""
+    large_fires = [f for f in fires if f["frp"] >= LARGE_FIRE_MIN_FRP]
+    small_fires = [f for f in fires if f["frp"] < LARGE_FIRE_MIN_FRP]
+
+    clusters = [
+        {"lat": f["lat"], "lng": f["lng"], "count": 1, "totalFrp": f["frp"], "maxFrp": f["frp"]}
+        for f in large_fires
+    ]
+
     groups: dict[tuple[int, int], list[dict]] = {}
-    for f in fires:
+    for f in small_fires:
         key = (round(f["lat"] / grid_deg), round(f["lng"] / grid_deg))
         groups.setdefault(key, []).append(f)
 
-    clusters = []
     for group in groups.values():
         total_frp = sum(f["frp"] for f in group)
         max_frp = max(f["frp"] for f in group)
@@ -298,13 +323,22 @@ async def get_wind_batch(points: list[WindPoint]):
         if isinstance(data, dict):  # Open-Meteo returns a plain object for a single point
             data = [data]
         for point, entry in zip(chunk, data):
-            current = entry["current"]
-            key = f"{_round_coord(point.lat)},{_round_coord(point.lng)}"
-            _current_wind_cache[key] = {
-                "wind_speed_kmh": current["wind_speed_10m"],
-                "wind_blowing_toward_deg": (current["wind_direction_10m"] + 180) % 360,
-                "fetched_at": now,
-            }
+            # One malformed entry (Open-Meteo occasionally returns an error
+            # object for a single bad point within an otherwise-good batch)
+            # used to throw here uncaught, 500ing the whole request and
+            # losing every other point in the batch along with it. Skipping
+            # just that point keeps the rest of the batch - and the request -
+            # alive.
+            try:
+                current = entry["current"]
+                key = f"{_round_coord(point.lat)},{_round_coord(point.lng)}"
+                _current_wind_cache[key] = {
+                    "wind_speed_kmh": current["wind_speed_10m"],
+                    "wind_blowing_toward_deg": (current["wind_direction_10m"] + 180) % 360,
+                    "fetched_at": now,
+                }
+            except (KeyError, TypeError):
+                continue
 
     results = []
     for point in points:
@@ -371,31 +405,40 @@ async def get_wind_forecast_batch(req: ForecastRequest):
             "wind_speed_unit": "kmh",
             "forecast_days": forecast_days,
         }
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(WIND_URL, params=params)
-            resp.raise_for_status()
-        data = resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(WIND_URL, params=params)
+                resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPError:
+            data = []
         if isinstance(data, dict):
             data = [data]
 
         for point, entry in zip(uncached_points, data):
-            hourly = entry["hourly"]
-            speeds = hourly["wind_speed_10m"]
-            dirs = hourly["wind_direction_10m"]
-            hums = hourly["relative_humidity_2m"]
-            precip = hourly["precipitation"]
-            temps = hourly["temperature_2m"]
-            steps = [
-                {
-                    "hours_from_now": i,
-                    "wind_speed_kmh": speeds[i],
-                    "wind_blowing_toward_deg": (dirs[i] + 180) % 360,
-                    "humidity_pct": hums[i],
-                    "precipitation_mm": precip[i],
-                    "temperature_c": temps[i],
-                }
-                for i in range(0, min(len(speeds), req.hours + 1), 6)
-            ]
+            # A single bad point (or a request-level failure, handled above
+            # by falling back to an empty list) shouldn't take out every
+            # other point's forecast - skip just this one and keep going.
+            try:
+                hourly = entry["hourly"]
+                speeds = hourly["wind_speed_10m"]
+                dirs = hourly["wind_direction_10m"]
+                hums = hourly["relative_humidity_2m"]
+                precip = hourly["precipitation"]
+                temps = hourly["temperature_2m"]
+                steps = [
+                    {
+                        "hours_from_now": i,
+                        "wind_speed_kmh": speeds[i],
+                        "wind_blowing_toward_deg": (dirs[i] + 180) % 360,
+                        "humidity_pct": hums[i],
+                        "precipitation_mm": precip[i],
+                        "temperature_c": temps[i],
+                    }
+                    for i in range(0, min(len(speeds), req.hours + 1), 6)
+                ]
+            except (KeyError, TypeError, IndexError):
+                continue
             key = f"{_round_coord(point.lat)},{_round_coord(point.lng)},{req.hours}"
             _forecast_cache[key] = {"steps": steps, "fetched_at": now}
 
@@ -446,6 +489,67 @@ async def get_elevation_batch(points: list[WindPoint]):
         if cached is not None:
             results.append({"lat": point.lat, "lng": point.lng, "elevation_m": cached["elevation_m"]})
     return {"results": results}
+
+
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# Nominatim's usage policy requires an identifying User-Agent and caps at
+# ~1 request/sec for this kind of light, non-bulk use - fine here since it's
+# only a fallback, not the primary path.
+NOMINATIM_HEADERS = {"User-Agent": "hacksocial26-fire-tracker/1.0 (hackathon project)"}
+
+
+@app.get("/api/geocode")
+async def geocode(q: str = Query(..., min_length=1, description="free-text place name or address to look up")):
+    """Turns a place name/address into a lat/lng, for the 'is my home in
+    danger' address lookup. Tries Open-Meteo first (same vendor as the
+    wind/elevation endpoints - free, no key, no documented rate limit), but
+    it's a place-name gazetteer - cities, towns, landmarks - and often
+    misses a full street address ('123 Main St, Springfield'). Nominatim
+    (OpenStreetMap) covers those, so it's a second attempt when Open-Meteo
+    comes up empty, not the primary path (its stricter rate limit makes it
+    a worse default for every lookup)."""
+    params = {"name": q, "count": 1, "language": "en", "format": "json"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(GEOCODE_URL, params=params)
+            resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPError:
+        data = {}
+
+    results = data.get("results") or []
+    if results:
+        top = results[0]
+        return {
+            "lat": top["latitude"],
+            "lng": top["longitude"],
+            "name": top.get("name", q),
+            "admin1": top.get("admin1"),
+            "country": top.get("country"),
+            "source": "open-meteo",
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=NOMINATIM_HEADERS) as client:
+            resp = await client.get(NOMINATIM_URL, params={"q": q, "format": "jsonv2", "limit": 1})
+            resp.raise_for_status()
+        nominatim_results = resp.json()
+    except httpx.HTTPError:
+        nominatim_results = []
+
+    if not nominatim_results:
+        raise HTTPException(status_code=404, detail=f"Couldn't find a location matching '{q}'")
+
+    top = nominatim_results[0]
+    return {
+        "lat": float(top["lat"]),
+        "lng": float(top["lon"]),
+        "name": top.get("display_name", q),
+        "admin1": None,
+        "country": None,
+        "source": "nominatim",
+    }
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
