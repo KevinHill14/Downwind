@@ -584,50 +584,92 @@ async def get_wind_forecast_batch(req: ForecastRequest):
 
     if uncached_points:
         forecast_days = min(7, max(1, (req.hours // 24) + 2))
-        params = {
-            "latitude": ",".join(str(p.lat) for p in uncached_points),
-            "longitude": ",".join(str(p.lng) for p in uncached_points),
-            "hourly": "wind_speed_10m,wind_direction_10m,relative_humidity_2m,precipitation,temperature_2m",
-            "wind_speed_unit": "kmh",
-            "forecast_days": forecast_days,
-        }
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(WIND_URL, params=params)
-                resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPError as e:
-            print(f"[wind/forecast/batch] Open-Meteo request failed: {type(e).__name__}: {e}")
-            data = []
-        if isinstance(data, dict):
-            data = [data]
 
-        for point, entry in zip(uncached_points, data):
-            # A single bad point (or a request-level failure, handled above
-            # by falling back to an empty list) shouldn't take out every
-            # other point's forecast - skip just this one and keep going.
+        # A single unchunked request for a country with many fire clusters
+        # (e.g. France) - up to 168 hours x 5 variables x every point in one
+        # go - was genuinely slow enough on Open-Meteo's end to blow past a
+        # flat 15s client timeout, silently returning zero predictions for
+        # that entire country while a small country (few points) finished in
+        # time. Chunking (same pattern as /api/wind/batch) keeps each
+        # individual request small/fast and lets one slow or failed chunk
+        # skip just its own points instead of taking out the whole country;
+        # chunks run concurrently so this isn't slower overall than the one
+        # big request was meant to be.
+        FORECAST_BATCH_CHUNK_SIZE = 40
+
+        async def fetch_chunk(chunk: list[WindPoint]) -> None:
+            params = {
+                "latitude": ",".join(str(p.lat) for p in chunk),
+                "longitude": ",".join(str(p.lng) for p in chunk),
+                "hourly": "wind_speed_10m,wind_direction_10m,relative_humidity_2m,precipitation,temperature_2m",
+                "wind_speed_unit": "kmh",
+                "forecast_days": forecast_days,
+            }
             try:
-                hourly = entry["hourly"]
-                speeds = hourly["wind_speed_10m"]
-                dirs = hourly["wind_direction_10m"]
-                hums = hourly["relative_humidity_2m"]
-                precip = hourly["precipitation"]
-                temps = hourly["temperature_2m"]
-                steps = [
-                    {
-                        "hours_from_now": i,
-                        "wind_speed_kmh": speeds[i],
-                        "wind_blowing_toward_deg": (dirs[i] + 180) % 360,
-                        "humidity_pct": hums[i],
-                        "precipitation_mm": precip[i],
-                        "temperature_c": temps[i],
-                    }
-                    for i in range(0, min(len(speeds), req.hours + 1), 6)
-                ]
-            except (KeyError, TypeError, IndexError):
-                continue
-            key = f"{_round_coord(point.lat)},{_round_coord(point.lng)},{req.hours}"
-            _forecast_cache[key] = {"steps": steps, "fetched_at": now}
+                async with httpx.AsyncClient(timeout=25) as client:
+                    resp = await client.get(WIND_URL, params=params)
+                    resp.raise_for_status()
+                data = resp.json()
+            except httpx.HTTPError as e:
+                print(f"[wind/forecast/batch] Open-Meteo request failed for a "
+                      f"{len(chunk)}-point chunk: {type(e).__name__}: {e}")
+                return
+            if isinstance(data, dict):
+                # Open-Meteo returns a single object (not a list) both for a
+                # genuine one-point request AND, apparently, for some error
+                # conditions (e.g. exceeding its per-request location
+                # limit) - in the error case this single dict is NOT a
+                # per-point forecast, and wrapping it in a 1-element list
+                # would silently zip it against only the FIRST point while
+                # every other point in the chunk gets nothing, no
+                # exception, no log. A real forecast object always has an
+                # "hourly" key; anything else is almost certainly an error
+                # payload, worth seeing verbatim.
+                if "hourly" not in data and len(chunk) != 1:
+                    print(f"[wind/forecast/batch] unexpected single-object response for "
+                          f"a {len(chunk)}-point chunk: {data}")
+                    return
+                data = [data]
+            elif len(data) != len(chunk):
+                print(f"[wind/forecast/batch] Open-Meteo returned {len(data)} entries "
+                      f"for a {len(chunk)}-point chunk")
+
+            skipped = 0
+            for point, entry in zip(chunk, data):
+                # A single bad point shouldn't take out the rest of the
+                # chunk - skip just this one and keep going.
+                try:
+                    hourly = entry["hourly"]
+                    speeds = hourly["wind_speed_10m"]
+                    dirs = hourly["wind_direction_10m"]
+                    hums = hourly["relative_humidity_2m"]
+                    precip = hourly["precipitation"]
+                    temps = hourly["temperature_2m"]
+                    steps = [
+                        {
+                            "hours_from_now": i,
+                            "wind_speed_kmh": speeds[i],
+                            "wind_blowing_toward_deg": (dirs[i] + 180) % 360,
+                            "humidity_pct": hums[i],
+                            "precipitation_mm": precip[i],
+                            "temperature_c": temps[i],
+                        }
+                        for i in range(0, min(len(speeds), req.hours + 1), 6)
+                    ]
+                except (KeyError, TypeError, IndexError) as e:
+                    skipped += 1
+                    if skipped <= 3:  # first few only - a bad chunk can mean every point fails the same way
+                        print(f"[wind/forecast/batch] skipped point ({point.lat},{point.lng}): "
+                              f"{type(e).__name__}: {e} - entry was {entry!r}")
+                    continue
+                key = f"{_round_coord(point.lat)},{_round_coord(point.lng)},{req.hours}"
+                _forecast_cache[key] = {"steps": steps, "fetched_at": now}
+
+        chunks = [
+            uncached_points[i : i + FORECAST_BATCH_CHUNK_SIZE]
+            for i in range(0, len(uncached_points), FORECAST_BATCH_CHUNK_SIZE)
+        ]
+        await asyncio.gather(*(fetch_chunk(c) for c in chunks))
 
     results = []
     for point in req.points:
