@@ -26,11 +26,11 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv()  # picks up FIRMS_MAP_KEY from a local .env file, so it survives server restarts
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
 # All 3 current VIIRS NRT satellites, not just SNPP - one alone misses a
@@ -276,7 +276,7 @@ async def get_fires(
         None, description="west,south,east,north - restricts the query to a region (e.g. one country)"
     ),
     grid: float | None = Query(
-        None, description="pre-aggregate fires into grid_deg x grid_deg FRP-weighted clusters before returning"
+        None, gt=0, description="pre-aggregate fires into grid_deg x grid_deg FRP-weighted clusters before returning"
     ),
     min_frp: float | None = Query(
         None, description="drop individual detections weaker than this FRP (MW) - the 'toggle small fires' filter"
@@ -340,12 +340,19 @@ WIND_URL = "https://api.open-meteo.com/v1/forecast"
 
 
 class WindPoint(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+
+
+# Caps how many points a single request can submit - the frontend never
+# sends more than ~150 (predictions) or ~750 (elevation probes, 5/cell),
+# so a much higher request would only ever come from someone trying to
+# use this server to hammer Open-Meteo with a huge batch.
+MAX_BATCH_POINTS = 1000
 
 
 @app.post("/api/wind/batch")
-async def get_wind_batch(points: list[WindPoint]):
+async def get_wind_batch(points: list[WindPoint] = Body(..., max_length=MAX_BATCH_POINTS)):
     """Wind for many locations at once, chunked into a handful of requests
     (Open-Meteo supports comma-separated lat/lng lists) rather than one per
     point. Cached per-point since the same points get re-requested often."""
@@ -415,8 +422,8 @@ async def get_wind_batch(points: list[WindPoint]):
 
 
 class ForecastRequest(BaseModel):
-    points: list[WindPoint]
-    hours: int
+    points: list[WindPoint] = Field(max_length=MAX_BATCH_POINTS)
+    hours: int = Field(ge=1, le=24 * 14)
 
 
 # Per-point caches, keyed by rounded coordinates (~110m precision - plenty
@@ -540,7 +547,7 @@ ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
 
 
 @app.post("/api/elevation/batch")
-async def get_elevation_batch(points: list[WindPoint]):
+async def get_elevation_batch(points: list[WindPoint] = Body(..., max_length=MAX_BATCH_POINTS)):
     """Ground elevation for many locations in one request - used to bias
     predicted spread speed uphill/downhill at prediction strength 3+."""
     if not points:
@@ -584,7 +591,7 @@ NOMINATIM_HEADERS = {"User-Agent": "hacksocial26-fire-tracker/1.0 (hackathon pro
 
 
 @app.get("/api/geocode")
-async def geocode(q: str = Query(..., min_length=1, description="free-text place name or address to look up")):
+async def geocode(q: str = Query(..., min_length=1, max_length=200, description="free-text place name or address to look up")):
     """Turns a place name/address into a lat/lng. Tries Open-Meteo first
     (free, no key, no documented rate limit), but it's a place-name
     gazetteer that often misses a full street address - Nominatim
