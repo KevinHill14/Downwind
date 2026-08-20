@@ -212,21 +212,28 @@ async def _refresh_world_fires() -> None:
 
 
 async def _world_fires_refresh_loop() -> None:
+    # Fetches first, then sleeps - not the other way around. Run as a
+    # background task from startup (not awaited there), so a slow or
+    # failing NASA/CWFIS response never blocks the ASGI startup event
+    # itself. That event completing is what makes the app "ready" - if
+    # it never completes (FIRMS hanging, not just erroring, doesn't get
+    # caught by a try/except around an await IN that event), Render has
+    # nothing to route traffic to and shows "502 - service unavailable"
+    # until the deploy times out, exactly like a real outage even though
+    # the app itself is fine and would serve empty-but-valid responses
+    # in the meantime.
     while True:
-        await asyncio.sleep(WORLD_REFRESH_INTERVAL_SECONDS)
         try:
             await _refresh_world_fires()
-        except Exception:
-            pass  # keep serving the last good data rather than let a transient hiccup kill the loop
+        except Exception as e:
+            print(f"[refresh] fire fetch failed, keeping last known data: {type(e).__name__}: {e}")
+        await asyncio.sleep(WORLD_REFRESH_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
 async def _on_startup():
     if not FIRMS_MAP_KEY:
         return
-    # Blocks startup for one fetch so the first real request is already
-    # fast instead of racing an in-progress background one.
-    await _refresh_world_fires()
     asyncio.create_task(_world_fires_refresh_loop())
 
 
