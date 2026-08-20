@@ -1234,7 +1234,10 @@ function renderCountryResults(query) {
         // the stale results list still open.
         countrySearch.value = c.name;
         countryResults.innerHTML = '';
-        continentPanelEl.classList.remove('searchMode');
+        // Deliberately NOT exiting search mode here (unlike clearCountrySearch)
+        // - on mobile, the compact search popup is what selecting a country
+        // should settle into, not a bounce back to the full Quick Look list.
+        // Only the X (clearCountrySearch) backs all the way out to that.
         flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
         const fires = await loadCountryFires(c);
         // If search-clear (X) fired while that fetch was in flight, it
