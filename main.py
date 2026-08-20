@@ -470,44 +470,41 @@ class WindPoint(BaseModel):
 MAX_BATCH_POINTS = 1000
 
 # Caps how many requests to Open-Meteo can be in flight at once, across
-# every endpoint and every concurrent user - a single prediction already
-# fires several chunks concurrently (see FORECAST_BATCH_CHUNK_SIZE below),
-# and two people predicting at the same moment used to just let all of
-# those race out at once, which is exactly what tripped Open-Meteo's rate
-# limit (observed directly: 429s on 24-40 point chunks in production).
-# This throttles to a shared budget instead - requests queue for a slot
-# rather than all firing simultaneously. Lowered from 4 to 3 after a large
-# country's prediction (many chunks) still tripped 429s repeatedly even
-# with the cap and retries below - a gentler outbound rate is more likely
-# to stay under Open-Meteo's limit in the first place, not just recover
-# from it faster.
-_OPEN_METEO_CONCURRENCY = asyncio.Semaphore(3)
+# every endpoint and every concurrent user. Serialized to 1: escalating
+# this (previously 3, briefly 4) plus retries with growing exponential
+# backoff was tried and made things WORSE, not better - a live production
+# log for a France prediction showed retries backing off all the way out
+# to ~90s cumulative and STILL getting 429'd, meaning the throttle wasn't
+# a brief burst that backing off recovers from, it was sustained. Every
+# retry in that state is just more load stacked onto an already-saturated
+# shared quota (shared across every concurrent user of this app, since
+# Open-Meteo rate-limits by source IP) - it doesn't help that request
+# succeed and it makes the throttle last longer for everyone else's
+# requests too. Fully serializing to one outbound call at a time is the
+# gentlest possible request rate this app can offer, which is the actual
+# lever that keeps 429s from happening in the first place.
+_OPEN_METEO_CONCURRENCY = asyncio.Semaphore(1)
 
 
-async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: int = 4) -> httpx.Response:
+async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: int = 2) -> httpx.Response:
     """GET through the shared client and concurrency cap, retrying a 429
-    (rate limited) with backoff instead of just dropping that chunk's
-    points - a 429 used to silently degrade a prediction (fewer markers
-    than fires actually present) rather than being retried.
+    (rate limited) a couple of times with a short flat delay before giving
+    up and letting the caller skip that chunk (fewer markers than fires
+    actually present, logged - not a full prediction failure).
+
+    Deliberately NOT the aggressive exponential-backoff retry (up to 4
+    attempts, up to ~90s) this used to be: that assumed a 429 meant a
+    brief burst that waiting out would clear, but production showed a
+    sustained throttle that never cleared no matter how long the backoff
+    grew - by the time attempt 4 fired (~90s in), it still 429'd. A short
+    retry budget covers the case that's actually recoverable (a genuine
+    momentary blip) without holding the request open for a minute and a
+    half only to fail anyway.
 
     The concurrency slot is only held for the actual request attempt, not
-    the backoff sleep between attempts - holding it through the sleep (the
-    original bug here) meant a chunk waiting out a 429 kept occupying one
-    of the few slots, blocking other chunks from even making their FIRST
-    attempt, which made a rate-limited burst worse instead of better.
-    Retries/backoff were also raised (2->4 attempts, 2s->4s base, more
-    generous exponential growth) after a large country's prediction (many
-    chunks fired close together) kept exhausting the old 2-retry/short-
-    backoff budget before Open-Meteo's rate-limit window actually reset -
-    predictions already show a live elapsed-time counter, so a slower but
-    complete result reads better than a faster but partial one.
-
-    Jitter on the backoff is load-bearing, not cosmetic: a live production
-    log showed two chunks from the same prediction hitting 429 at the same
-    moment, backing off the same deterministic delay, and colliding again
-    on every retry - the exponential growth never mattered because they
-    were always in lockstep. Randomizing spreads retries apart so they stop
-    re-colliding on every attempt."""
+    the backoff sleep between attempts - holding it through the sleep (an
+    earlier bug here) meant a chunk waiting out a 429 kept occupying the
+    slot, blocking other chunks from even making their FIRST attempt."""
     for attempt in range(max_retries + 1):
         async with _OPEN_METEO_CONCURRENCY:
             resp = await _http_client.get(url, params=params, timeout=timeout)
@@ -515,7 +512,7 @@ async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: i
             resp.raise_for_status()
             return resp
         retry_after = resp.headers.get("Retry-After")
-        delay = float(retry_after) if retry_after else 4.0 * (2**attempt) * random.uniform(0.7, 1.6)
+        delay = float(retry_after) if retry_after else random.uniform(3.0, 6.0)
         print(f"[open-meteo] 429 rate limited on {url}, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
         await asyncio.sleep(delay)
 
@@ -656,19 +653,17 @@ async def get_wind_forecast_batch(req: ForecastRequest):
         # A single unchunked request for a country with many fire clusters
         # (e.g. France) was slow enough on Open-Meteo's end to blow past a
         # flat 15s timeout, silently returning zero predictions for that
-        # whole country. Chunked (same pattern as /api/wind/batch) and run
-        # concurrently, so this isn't slower overall.
+        # whole country. Chunked (same pattern as /api/wind/batch) so no
+        # single request risks that timeout - chunks are launched together
+        # but actually reach Open-Meteo one at a time, serialized by
+        # _OPEN_METEO_CONCURRENCY, which trades some speed for not
+        # tripping the rate limit in the first place.
         FORECAST_BATCH_CHUNK_SIZE = 40
 
-        async def fetch_chunk(chunk: list[WindPoint], index: int) -> None:
-            # Chunks used to all fire their first attempt at once, so a
-            # prediction with several chunks would get 429'd on all of them
-            # simultaneously and then retry in lockstep forever (see the
-            # jitter note on _get_with_retry) - staggering the very first
-            # request, not just the retries, stops that collision from
-            # happening in the first place.
-            if index > 0:
-                await asyncio.sleep(index * 0.6 + random.uniform(0, 0.3))
+        async def fetch_chunk(chunk: list[WindPoint]) -> None:
+            # No manual staggering needed here - _OPEN_METEO_CONCURRENCY is
+            # serialized to 1, so chunks are already forced through
+            # one-at-a-time by the concurrency gate itself.
             params = {
                 "latitude": ",".join(str(p.lat) for p in chunk),
                 "longitude": ",".join(str(p.lng) for p in chunk),
@@ -730,7 +725,7 @@ async def get_wind_forecast_batch(req: ForecastRequest):
             uncached_points[i : i + FORECAST_BATCH_CHUNK_SIZE]
             for i in range(0, len(uncached_points), FORECAST_BATCH_CHUNK_SIZE)
         ]
-        await asyncio.gather(*(fetch_chunk(c, i) for i, c in enumerate(chunks)))
+        await asyncio.gather(*(fetch_chunk(c) for c in chunks))
 
     results = []
     for point in req.points:
