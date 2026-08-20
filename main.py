@@ -22,6 +22,7 @@ import gzip
 import json
 import math
 import os
+import random
 import time
 from datetime import datetime, timezone
 
@@ -433,7 +434,14 @@ async def get_fires(
 
         if grid is not None:
             # Aggregated, not truncated - every fire still contributes to a cluster.
-            fires = _cluster_fires(fires, grid)
+            # Off the event loop: this is pure synchronous Python over up to
+            # tens of thousands of fires, and running it inline was found
+            # (during a load-testing pass) to stall every OTHER concurrent
+            # request - even cheap cache hits and unrelated endpoints - for
+            # as long as clustering took, since nothing else on the single
+            # event loop could run meanwhile. to_thread lets the interpreter
+            # keep servicing other requests while this grinds through.
+            fires = await asyncio.to_thread(_cluster_fires, fires, grid)
 
         result = {"fires": fires, "count": len(fires), "raw_count": raw_count}
         if bbox is None:
@@ -492,7 +500,14 @@ async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: i
     chunks fired close together) kept exhausting the old 2-retry/short-
     backoff budget before Open-Meteo's rate-limit window actually reset -
     predictions already show a live elapsed-time counter, so a slower but
-    complete result reads better than a faster but partial one."""
+    complete result reads better than a faster but partial one.
+
+    Jitter on the backoff is load-bearing, not cosmetic: a live production
+    log showed two chunks from the same prediction hitting 429 at the same
+    moment, backing off the same deterministic delay, and colliding again
+    on every retry - the exponential growth never mattered because they
+    were always in lockstep. Randomizing spreads retries apart so they stop
+    re-colliding on every attempt."""
     for attempt in range(max_retries + 1):
         async with _OPEN_METEO_CONCURRENCY:
             resp = await _http_client.get(url, params=params, timeout=timeout)
@@ -500,8 +515,8 @@ async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: i
             resp.raise_for_status()
             return resp
         retry_after = resp.headers.get("Retry-After")
-        delay = float(retry_after) if retry_after else 4.0 * (2**attempt)
-        print(f"[open-meteo] 429 rate limited on {url}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+        delay = float(retry_after) if retry_after else 4.0 * (2**attempt) * random.uniform(0.7, 1.6)
+        print(f"[open-meteo] 429 rate limited on {url}, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
         await asyncio.sleep(delay)
 
 
@@ -645,7 +660,15 @@ async def get_wind_forecast_batch(req: ForecastRequest):
         # concurrently, so this isn't slower overall.
         FORECAST_BATCH_CHUNK_SIZE = 40
 
-        async def fetch_chunk(chunk: list[WindPoint]) -> None:
+        async def fetch_chunk(chunk: list[WindPoint], index: int) -> None:
+            # Chunks used to all fire their first attempt at once, so a
+            # prediction with several chunks would get 429'd on all of them
+            # simultaneously and then retry in lockstep forever (see the
+            # jitter note on _get_with_retry) - staggering the very first
+            # request, not just the retries, stops that collision from
+            # happening in the first place.
+            if index > 0:
+                await asyncio.sleep(index * 0.6 + random.uniform(0, 0.3))
             params = {
                 "latitude": ",".join(str(p.lat) for p in chunk),
                 "longitude": ",".join(str(p.lng) for p in chunk),
@@ -707,7 +730,7 @@ async def get_wind_forecast_batch(req: ForecastRequest):
             uncached_points[i : i + FORECAST_BATCH_CHUNK_SIZE]
             for i in range(0, len(uncached_points), FORECAST_BATCH_CHUNK_SIZE)
         ]
-        await asyncio.gather(*(fetch_chunk(c) for c in chunks))
+        await asyncio.gather(*(fetch_chunk(c, i) for i, c in enumerate(chunks)))
 
     results = []
     for point in req.points:
