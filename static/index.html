@@ -1629,6 +1629,13 @@ world
 
 document.querySelectorAll('#continentPanel button').forEach(btn => {
   btn.addEventListener('click', () => {
+    // Reset Zoom is a full reset, not just a fly-to - clears the search box,
+    // any active prediction, and the status text back to the world count,
+    // same as the X. The other continent buttons just fly the camera.
+    if (btn.id === 'resetZoomBtn') {
+      clearCountrySearch();
+      return;
+    }
     flyToPointOfView(
       { lat: parseFloat(btn.dataset.lat), lng: parseFloat(btn.dataset.lng), altitude: parseFloat(btn.dataset.alt) },
       1000
