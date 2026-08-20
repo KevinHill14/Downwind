@@ -17,6 +17,9 @@ NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
 """
 import asyncio
+import dataclasses
+import gzip
+import json
 import math
 import os
 import time
@@ -26,9 +29,11 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv()  # picks up FIRMS_MAP_KEY from a local .env file, so it survives server restarts
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -48,12 +53,47 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Compresses responses over 1KB - the raw (non-clustered) fire lists a
+# country search returns can run to hundreds of KB of JSON; gzip shrinks
+# that substantially for near-zero CPU cost.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# One shared, connection-pooling client for every outbound request this
+# server makes (FIRMS, CWFIS, Open-Meteo, Nominatim), instead of opening a
+# brand new client - and paying a fresh TCP/TLS handshake - for every single
+# request/chunk. Created at startup, closed at shutdown; per-call timeouts
+# still override the default via `timeout=` on each request.
+_http_client: httpx.AsyncClient | None = None
+
+# A plain dict per fire (what this used to be) has real per-object overhead
+# in CPython - at world scale (~600K raw detections across 3 satellites)
+# that was measured at ~430MB RSS just for this one in-memory list, uncomfortably
+# close to Render's 512MB free-tier ceiling before any request had even come
+# in. @dataclass(slots=True) drops that by avoiding each fire's own hash
+# table entirely. Kept subscriptable (__getitem__/get) so every existing
+# `f["lat"]` / `f.get("ha")` read site elsewhere in this file didn't need to
+# change - only the two construction sites below do.
+@dataclasses.dataclass(slots=True)
+class Fire:
+    lat: float
+    lng: float
+    confidence: str
+    frp: float
+    acq_date: str
+    acq_time: str
+    ha: float | None = None  # hectares burned - ground-sourced fires only
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
 
 async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
     url = FIRMS_URL.format(key=FIRMS_MAP_KEY, source=source, area=area)
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
+    resp = await _http_client.get(url, timeout=30)
+    resp.raise_for_status()
 
     lines = resp.text.strip().splitlines()
     if not lines:
@@ -68,14 +108,14 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
         cols = line.split(",")
         try:
             fires.append(
-                {
-                    "lat": float(cols[idx["latitude"]]),
-                    "lng": float(cols[idx["longitude"]]),
-                    "confidence": cols[idx["confidence"]],
-                    "frp": float(cols[idx["frp"]]),  # fire radiative power (MW), proxy for intensity
-                    "acq_date": cols[idx["acq_date"]],
-                    "acq_time": cols[idx["acq_time"]],
-                }
+                Fire(
+                    lat=float(cols[idx["latitude"]]),
+                    lng=float(cols[idx["longitude"]]),
+                    confidence=cols[idx["confidence"]],
+                    frp=float(cols[idx["frp"]]),  # fire radiative power (MW), proxy for intensity
+                    acq_date=cols[idx["acq_date"]],
+                    acq_time=cols[idx["acq_time"]],
+                )
             )
         except (ValueError, IndexError, KeyError):
             continue
@@ -101,9 +141,8 @@ async def _fetch_canada_fires() -> list[dict]:
     knows it's there. Canada-only for now, not deduplicated against
     satellite hotspots for the same fire beyond the radius-based check
     below - both are real signal."""
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(CANADA_FIRES_URL)
-        resp.raise_for_status()
+    resp = await _http_client.get(CANADA_FIRES_URL, timeout=20)
+    resp.raise_for_status()
 
     lines = resp.text.strip().splitlines()
     if not lines:
@@ -125,24 +164,24 @@ async def _fetch_canada_fires() -> list[dict]:
             status_str = cols[idx["status_date"]] or cols[idx["situation_report_date"]]
             dt = datetime.fromisoformat(status_str) if status_str else datetime.now(timezone.utc)
             fires.append(
-                {
-                    "lat": lat,
-                    "lng": lng,
+                Fire(
+                    lat=lat,
+                    lng=lng,
                     # Ground-confirmed by agency dispatch - the highest
                     # confidence tier this app has.
-                    "confidence": "h",
+                    confidence="h",
                     # No FRP for ground-confirmed fires - hectares burned is
                     # the closest severity proxy, log-scaled and floored
                     # above LARGE_FIRE_MIN_FRP so it always renders as its
                     # own marker (a real, verified incident).
-                    "frp": max(30.0, math.log1p(hectares) * 15),
-                    "acq_date": dt.strftime("%Y-%m-%d"),
-                    "acq_time": dt.strftime("%H%M"),
+                    frp=max(30.0, math.log1p(hectares) * 15),
+                    acq_date=dt.strftime("%Y-%m-%d"),
+                    acq_time=dt.strftime("%H%M"),
                     # Real hectares, kept alongside the derived FRP proxy so
                     # ground fires can be filtered by actual size (min_hectares
-                    # below). Satellite detections have no "ha" field.
-                    "ha": hectares,
-                }
+                    # below). Satellite detections leave this None.
+                    ha=hectares,
+                )
             )
         except (TypeError, ValueError, IndexError, KeyError):
             # Skip just this row - a bad one shouldn't drop the whole refresh.
@@ -160,6 +199,21 @@ WORLD_REFRESH_INTERVAL_SECONDS = 10 * 60  # matches FIRMS' own NRT refresh caden
 # hundred thousand rows) to hold in memory and filter/cluster in plain
 # Python, so every /api/fires request is a local list comprehension.
 _world_fires: list[dict] = []
+
+# The world (bbox=None, grid set) response - what every visitor's first
+# page load requests - takes real CPU: clustering, JSON-encoding, json.dumps,
+# and gzip compression, measured at ~2.6s combined for the full dataset.
+# Many people loading the map at once used to each redo all of that from
+# scratch; this caches BOTH the plain and pre-gzipped JSON bytes, so a
+# cache hit skips straight to sending a response - no re-clustering,
+# re-serializing, or re-compressing. (Storing the compressed variant too,
+# rather than relying on GZipMiddleware to compress the cached bytes fresh
+# each time, is what actually removes that per-request cost - middleware
+# has no way to know two different requests want the identical output.)
+# Cleared whenever _world_fires refreshes (see _refresh_world_fires), so
+# it's never more than one refresh cycle (10 min) stale - the same
+# staleness the raw data already has.
+_world_view_cache: dict[tuple, tuple[bytes, bytes]] = {}  # key -> (plain_json, gzipped_json)
 
 
 # ~0.15deg (~15-17km) - a VIIRS pixel this close to a ground-reported fire
@@ -209,6 +263,7 @@ async def _refresh_world_fires() -> None:
 
     satellite_fires = _dedupe_against_ground(satellite_fires, ground_fires)
     _world_fires = satellite_fires + ground_fires
+    _world_view_cache.clear()  # stale now that the underlying data changed
 
 
 async def _world_fires_refresh_loop() -> None:
@@ -232,9 +287,18 @@ async def _world_fires_refresh_loop() -> None:
 
 @app.on_event("startup")
 async def _on_startup():
+    global _http_client
+    _http_client = httpx.AsyncClient()
+    asyncio.create_task(_cache_eviction_loop())
     if not FIRMS_MAP_KEY:
         return
     asyncio.create_task(_world_fires_refresh_loop())
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    if _http_client is not None:
+        await _http_client.aclose()
 
 
 def _filter_bbox(fires: list[dict], west: float, south: float, east: float, north: float) -> list[dict]:
@@ -277,8 +341,23 @@ def _cluster_fires(fires: list[dict], grid_deg: float) -> list[dict]:
     return clusters
 
 
+# Bounds how many /api/fires requests can be doing the actual filter/
+# cluster/encode work at once. Normal usage - even a dozen-plus different
+# people doing different things simultaneously - never gets remotely close
+# to this, so it never affects them. It only matters in a genuine pile-up
+# (many people loading the map in the same few seconds, before the cache
+# above has anything to serve yet): instead of every one of them queuing
+# behind however long it takes to grind through the whole backlog
+# (observed directly: minutes, with a real risk of the memory spike that
+# caused the original OOM crash), requests past the cap get a fast, clear
+# "busy, retry" response instead of hanging.
+_FIRES_COMPUTE_SEMAPHORE = asyncio.Semaphore(20)
+_FIRES_COMPUTE_WAIT_TIMEOUT_SECONDS = 15
+
+
 @app.get("/api/fires")
 async def get_fires(
+    request: Request,
     bbox: str | None = Query(
         None, description="west,south,east,north - restricts the query to a region (e.g. one country)"
     ),
@@ -304,43 +383,68 @@ async def get_fires(
             "Get a free key at https://firms.modaps.eosdis.nasa.gov/api/",
         )
 
-    fires = _world_fires
-    if bbox is not None:
-        parts = bbox.split(",")
-        if len(parts) != 4:
-            raise HTTPException(status_code=400, detail="bbox must be 'west,south,east,north'")
-        try:
-            west, south, east, north = (float(p) for p in parts)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="bbox values must be numeric")
-        if not (-180 <= west <= 180 and -180 <= east <= 180):
-            raise HTTPException(status_code=400, detail="west/east must be within [-180, 180]")
-        if not (-90 <= south <= 90 and -90 <= north <= 90):
-            raise HTTPException(status_code=400, detail="south/north must be within [-90, 90]")
-        if west >= east or south >= north:
-            raise HTTPException(status_code=400, detail="bbox must satisfy west<east and south<north")
-        fires = _filter_bbox(fires, west, south, east, north)
+    # Only the world view (no bbox) is cached - many concurrent visitors
+    # requesting the exact same default view is the common case worth
+    # short-circuiting; a country search's bbox varies too much per user
+    # to be worth caching the same way.
+    cache_key = (grid, min_frp, min_confidence, min_hectares)
+    if bbox is None and cache_key in _world_view_cache:
+        plain_body, gzip_body = _world_view_cache[cache_key]
+        if "gzip" in request.headers.get("accept-encoding", ""):
+            return Response(content=gzip_body, media_type="application/json", headers={"Content-Encoding": "gzip"})
+        return Response(content=plain_body, media_type="application/json")
 
-    # min_confidence is accepted but currently ignored - an "h"-only floor
-    # dropped France from 300 detections to 1 ("h" confidence is rare in
-    # VIIRS data generally). Re-enable with a better-calibrated threshold.
+    try:
+        await asyncio.wait_for(_FIRES_COMPUTE_SEMAPHORE.acquire(), timeout=_FIRES_COMPUTE_WAIT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Server is busy right now - please try again in a moment.")
+    try:
+        fires = _world_fires
+        if bbox is not None:
+            parts = bbox.split(",")
+            if len(parts) != 4:
+                raise HTTPException(status_code=400, detail="bbox must be 'west,south,east,north'")
+            try:
+                west, south, east, north = (float(p) for p in parts)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="bbox values must be numeric")
+            if not (-180 <= west <= 180 and -180 <= east <= 180):
+                raise HTTPException(status_code=400, detail="west/east must be within [-180, 180]")
+            if not (-90 <= south <= 90 and -90 <= north <= 90):
+                raise HTTPException(status_code=400, detail="south/north must be within [-90, 90]")
+            if west >= east or south >= north:
+                raise HTTPException(status_code=400, detail="bbox must satisfy west<east and south<north")
+            fires = _filter_bbox(fires, west, south, east, north)
 
-    if min_frp is not None:
-        # A flat intensity floor, not a top-N cap - a rank-based cap can
-        # bury a real regional fire under stronger fires elsewhere.
-        fires = [f for f in fires if f["frp"] >= min_frp]
+        # min_confidence is accepted but currently ignored - an "h"-only floor
+        # dropped France from 300 detections to 1 ("h" confidence is rare in
+        # VIIRS data generally). Re-enable with a better-calibrated threshold.
 
-    if min_hectares is not None:
-        # Only affects ground-sourced fires (the only ones with "ha").
-        fires = [f for f in fires if f.get("ha") is None or f["ha"] >= min_hectares]
+        if min_frp is not None:
+            # A flat intensity floor, not a top-N cap - a rank-based cap can
+            # bury a real regional fire under stronger fires elsewhere.
+            fires = [f for f in fires if f["frp"] >= min_frp]
 
-    raw_count = len(fires)
+        if min_hectares is not None:
+            # Only affects ground-sourced fires (the only ones with "ha").
+            fires = [f for f in fires if f.get("ha") is None or f["ha"] >= min_hectares]
 
-    if grid is not None:
-        # Aggregated, not truncated - every fire still contributes to a cluster.
-        fires = _cluster_fires(fires, grid)
+        raw_count = len(fires)
 
-    return {"fires": fires, "count": len(fires), "raw_count": raw_count}
+        if grid is not None:
+            # Aggregated, not truncated - every fire still contributes to a cluster.
+            fires = _cluster_fires(fires, grid)
+
+        result = {"fires": fires, "count": len(fires), "raw_count": raw_count}
+        if bbox is None:
+            # Rendered once here for future cache hits; this request's own
+            # response is still produced normally below (via `return result`),
+            # so a cache miss behaves identically to before this cache existed.
+            plain_body = json.dumps(jsonable_encoder(result)).encode("utf-8")
+            _world_view_cache[cache_key] = (plain_body, gzip.compress(plain_body, compresslevel=6))
+        return result
+    finally:
+        _FIRES_COMPUTE_SEMAPHORE.release()
 
 
 WIND_URL = "https://api.open-meteo.com/v1/forecast"
@@ -356,6 +460,33 @@ class WindPoint(BaseModel):
 # so a much higher request would only ever come from someone trying to
 # use this server to hammer Open-Meteo with a huge batch.
 MAX_BATCH_POINTS = 1000
+
+# Caps how many requests to Open-Meteo can be in flight at once, across
+# every endpoint and every concurrent user - a single prediction already
+# fires several chunks concurrently (see FORECAST_BATCH_CHUNK_SIZE below),
+# and two people predicting at the same moment used to just let all of
+# those race out at once, which is exactly what tripped Open-Meteo's rate
+# limit (observed directly: 429s on 24-40 point chunks in production).
+# This throttles to a shared budget instead - requests queue for a slot
+# rather than all firing simultaneously.
+_OPEN_METEO_CONCURRENCY = asyncio.Semaphore(4)
+
+
+async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: int = 2) -> httpx.Response:
+    """GET through the shared client and concurrency cap, retrying a 429
+    (rate limited) with backoff instead of just dropping that chunk's
+    points - a 429 used to silently degrade a prediction (fewer markers
+    than fires actually present) rather than being retried."""
+    async with _OPEN_METEO_CONCURRENCY:
+        for attempt in range(max_retries + 1):
+            resp = await _http_client.get(url, params=params, timeout=timeout)
+            if resp.status_code != 429 or attempt == max_retries:
+                resp.raise_for_status()
+                return resp
+            retry_after = resp.headers.get("Retry-After")
+            delay = float(retry_after) if retry_after else 2.0 * (attempt + 1)
+            print(f"[open-meteo] 429 rate limited on {url}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+            await asyncio.sleep(delay)
 
 
 @app.post("/api/wind/batch")
@@ -387,9 +518,7 @@ async def get_wind_batch(points: list[WindPoint] = Body(..., max_length=MAX_BATC
             "wind_speed_unit": "kmh",
         }
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(WIND_URL, params=params)
-                resp.raise_for_status()
+            resp = await _get_with_retry(WIND_URL, params, timeout=15)
             data = resp.json()
         except httpx.HTTPError as e:
             # Logged so it's visible in host logs (e.g. Render) when the
@@ -442,6 +571,31 @@ _current_wind_cache: dict[str, dict] = {}  # "lat,lng" -> {"wind_speed_kmh", "wi
 FORECAST_CACHE_TTL_SECONDS = 15 * 60  # matches the FIRMS cache TTL
 ELEVATION_CACHE_TTL_SECONDS = 24 * 60 * 60  # terrain doesn't change; cached long, not forever, in case of bad reads
 
+# A cache entry going stale only ever meant "re-fetch it next time it's
+# asked for" - an entry nobody asks for again just sat there forever,
+# growing all three dicts without bound over the site's lifetime. This
+# sweeps out anything already past its own TTL above (so cache *lifetime*
+# - and the API-call savings that comes with it, especially the 24h
+# elevation one - is unchanged), just on a short interval so memory is
+# reclaimed promptly instead of accumulating for however long the process
+# happens to stay up.
+CACHE_EVICTION_INTERVAL_SECONDS = 2 * 60
+
+
+def _evict_expired(cache: dict[str, dict], ttl_seconds: float, now: float) -> None:
+    expired = [k for k, v in cache.items() if now - v["fetched_at"] >= ttl_seconds]
+    for k in expired:
+        del cache[k]
+
+
+async def _cache_eviction_loop() -> None:
+    while True:
+        await asyncio.sleep(CACHE_EVICTION_INTERVAL_SECONDS)
+        now = time.time()
+        _evict_expired(_forecast_cache, FORECAST_CACHE_TTL_SECONDS, now)
+        _evict_expired(_elevation_cache, ELEVATION_CACHE_TTL_SECONDS, now)
+        _evict_expired(_current_wind_cache, FORECAST_CACHE_TTL_SECONDS, now)
+
 
 def _round_coord(v: float) -> float:
     return round(v, 3)
@@ -484,9 +638,7 @@ async def get_wind_forecast_batch(req: ForecastRequest):
                 "forecast_days": forecast_days,
             }
             try:
-                async with httpx.AsyncClient(timeout=25) as client:
-                    resp = await client.get(WIND_URL, params=params)
-                    resp.raise_for_status()
+                resp = await _get_with_retry(WIND_URL, params, timeout=25)
                 data = resp.json()
             except httpx.HTTPError as e:
                 print(f"[wind/forecast/batch] Open-Meteo request failed for a "
@@ -573,9 +725,7 @@ async def get_elevation_batch(points: list[WindPoint] = Body(..., max_length=MAX
             "latitude": ",".join(str(p.lat) for p in uncached_points),
             "longitude": ",".join(str(p.lng) for p in uncached_points),
         }
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(ELEVATION_URL, params=params)
-            resp.raise_for_status()
+        resp = await _get_with_retry(ELEVATION_URL, params, timeout=15)
         data = resp.json()
         for point, elevation_m in zip(uncached_points, data["elevation"]):
             key = f"{_round_coord(point.lat)},{_round_coord(point.lng)}"
@@ -605,9 +755,8 @@ async def geocode(q: str = Query(..., min_length=1, max_length=200, description=
     (OpenStreetMap) covers those as a second attempt."""
     params = {"name": q, "count": 1, "language": "en", "format": "json"}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(GEOCODE_URL, params=params)
-            resp.raise_for_status()
+        resp = await _http_client.get(GEOCODE_URL, params=params, timeout=10)
+        resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPError:
         data = {}
@@ -625,12 +774,13 @@ async def geocode(q: str = Query(..., min_length=1, max_length=200, description=
         }
 
     try:
-        async with httpx.AsyncClient(timeout=10, headers=NOMINATIM_HEADERS) as client:
-            resp = await client.get(
-                NOMINATIM_URL,
-                params={"q": q, "format": "jsonv2", "limit": 1, "addressdetails": 1},
-            )
-            resp.raise_for_status()
+        resp = await _http_client.get(
+            NOMINATIM_URL,
+            params={"q": q, "format": "jsonv2", "limit": 1, "addressdetails": 1},
+            headers=NOMINATIM_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
         nominatim_results = resp.json()
     except httpx.HTTPError:
         nominatim_results = []
