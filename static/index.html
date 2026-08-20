@@ -1237,7 +1237,12 @@ function renderCountryResults(query) {
         continentPanelEl.classList.remove('searchMode');
         flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
         const fires = await loadCountryFires(c);
-        if (predictionToggle.checked) {
+        // If search-clear (X) fired while that fetch was in flight, it
+        // already set inCountryView back to false and flew the camera back
+        // out - without this check, this resumed chain would start a
+        // prediction for a country the user already backed out of, leaving
+        // one running with an empty search box.
+        if (predictionToggle.checked && inCountryView) {
           runCountryPredictions(c, fires);
         }
       });
