@@ -71,6 +71,10 @@
   #resetZoomBtn:hover { background: #e25822; border-color: #e25822; }
 
   #continentPanel hr { width: 100%; border: none; border-top: 1px solid #444; margin: 4px 0; }
+  /* Grouped so mobile search-mode can collapse the whole Quick Look button
+     stack as a single animated block (see below) instead of yanking each
+     child away with its own instant display:none. */
+  #quickLookButtons { display: flex; flex-direction: column; gap: 6px; }
   #countrySearchWrap { position: relative; display: flex; }
   #countrySearch {
     background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px;
@@ -189,7 +193,15 @@
     #continentToggle { top: 16px; left: 16px; }
     #optimizeToggle { top: 16px; right: 16px; }
 
-    #status { font-size: 11.5px; padding: 6px 10px; top: 62px; left: 16px; }
+    /* Centered at the top between the two corner toggle buttons instead of
+       stacked under the left one - a dedicated top-middle slot reads more
+       like a persistent status bar than something competing with Quick
+       Look's icon for the same corner. */
+    #status {
+      font-size: 11.5px; padding: 6px 10px; top: 16px; left: 50%; right: auto;
+      transform: translateX(-50%); max-width: calc(100vw - 132px);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
 
     #continentPanel, #optimizePanel {
       display: none; max-height: 65vh; overflow-y: auto;
@@ -199,14 +211,44 @@
     #continentPanel { left: 16px; }
     #optimizePanel { right: 16px; }
 
+    /* Search mode: tapping the search box collapses the continent-button
+       list (Reset Zoom, the 7 continents, both <hr>s) down to nothing,
+       leaving just the search box + results - a lighter "search popup"
+       rather than the full Quick Look list. Animated as one block (see
+       #quickLookButtons above) so it reads as a single smooth collapse
+       instead of every child vanishing separately.
+       #quickLookButtons */
+    #quickLookButtons {
+      overflow: hidden; transition: max-height 0.22s ease, opacity 0.18s ease, margin-top 0.22s ease;
+      max-height: 400px; opacity: 1;
+    }
+    #continentPanel.searchMode #quickLookButtons {
+      max-height: 0; opacity: 0; margin-top: -6px; pointer-events: none;
+    }
+    /* Normally only shown once text is typed (see the input listener) -
+       while actively in search mode it stays visible even with an empty
+       box, since it's now doubling as "Cancel" (exits search mode, not
+       just clears text). */
+    #continentPanel.searchMode #countrySearchClear {
+      display: block !important;
+      transition: color 0.15s ease;
+    }
+
     #predictionPanel, #addressPanel {
       left: 12px; right: 12px; bottom: 12px; max-width: none;
       max-height: 40vh; overflow-y: auto;
+      transition: opacity 0.2s ease, transform 0.2s ease;
     }
     #addressPanel { bottom: 12px; }
-    /* Stacks above the prediction panel instead of overlapping it when both
-       are visible at once (a running prediction + an address check). */
-    #predictionPanel { bottom: calc(12px + 40vh + 10px); }
+    /* Fire spread predictions replace "Am I in danger?" in the same bottom
+       slot on mobile rather than stacking above it - there isn't room for
+       both on a phone screen, and only one is ever relevant at a time
+       (mid-prediction vs. idle). Toggled via the .hiddenMobile class (see
+       setPredictionPanelVisible) instead of display:none so the swap can
+       fade/slide instead of popping. */
+    #addressPanel.hiddenMobile, #predictionPanel.hiddenMobile {
+      opacity: 0; transform: translateY(8px); pointer-events: none;
+    }
 
     .rangeSlider { width: 100%; }
   }
@@ -268,17 +310,19 @@
   </div>
 </div>
 <div id="continentPanel">
-  <h2>Quick Look</h2>
-  <button id="resetZoomBtn" data-lat="20" data-lng="0" data-alt="2.2">Reset Zoom</button>
-  <hr />
-  <button data-lat="1" data-lng="21" data-alt="1.8">Africa</button>
-  <button data-lat="-82" data-lng="0" data-alt="1.8">Antarctica</button>
-  <button data-lat="34" data-lng="100" data-alt="1.8">Asia</button>
-  <button data-lat="-25" data-lng="133" data-alt="1.8">Australia</button>
-  <button data-lat="54" data-lng="15" data-alt="1.8">Europe</button>
-  <button data-lat="45" data-lng="-100" data-alt="1.8">North America</button>
-  <button data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
-  <hr />
+  <div id="quickLookButtons">
+    <h2>Quick Look</h2>
+    <button id="resetZoomBtn" data-lat="20" data-lng="0" data-alt="2.2">Reset Zoom</button>
+    <hr />
+    <button data-lat="1" data-lng="21" data-alt="1.8">Africa</button>
+    <button data-lat="-82" data-lng="0" data-alt="1.8">Antarctica</button>
+    <button data-lat="34" data-lng="100" data-alt="1.8">Asia</button>
+    <button data-lat="-25" data-lng="133" data-alt="1.8">Australia</button>
+    <button data-lat="54" data-lng="15" data-alt="1.8">Europe</button>
+    <button data-lat="45" data-lng="-100" data-alt="1.8">North America</button>
+    <button data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
+    <hr />
+  </div>
   <div id="countrySearchWrap">
     <input type="text" id="countrySearch" placeholder="Search country..." autocomplete="off" />
     <button id="countrySearchClear" title="Clear search">&times;</button>
@@ -328,6 +372,10 @@ const statusEl = document.getElementById('status');
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+// Mirrors the @media (max-width: 820px) breakpoint used throughout the CSS -
+// mobile-only JS behavior checks this instead of hardcoding the number a
+// second time.
+function isMobile() { return window.matchMedia('(max-width: 820px)').matches; }
 
 // Fire severity scale: log-normalized so a handful of very intense fires
 // (or clusters) don't wash out everything else at max marker size.
@@ -1186,6 +1234,7 @@ function renderCountryResults(query) {
         // the stale results list still open.
         countrySearch.value = c.name;
         countryResults.innerHTML = '';
+        continentPanelEl.classList.remove('searchMode');
         flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
         const fires = await loadCountryFires(c);
         if (predictionToggle.checked) {
@@ -1202,6 +1251,7 @@ function clearCountrySearch() {
   countrySearch.value = '';
   countryResults.innerHTML = '';
   countrySearchClear.style.display = 'none';
+  continentPanelEl.classList.remove('searchMode');
   // Back to the current world-wide "Fires shown" setting rather than
   // staying stuck on whatever country was last searched.
   lastPredictedCountry = null;
@@ -1224,7 +1274,10 @@ function clearCountrySearch() {
 
 countrySearch.addEventListener('input', () => {
   const query = countrySearch.value.trim();
-  countrySearchClear.style.display = query ? 'block' : 'none';
+  // In mobile search mode the X doubles as "Cancel" and stays visible even
+  // with an empty box (see clearCountrySearch/the focus listener below) -
+  // only fall back to the plain "hide when empty" rule outside that mode.
+  countrySearchClear.style.display = (query || continentPanelEl.classList.contains('searchMode')) ? 'block' : 'none';
   renderCountryResults(query);
   if (!query) {
     lastPredictedCountry = null;
@@ -1234,6 +1287,17 @@ countrySearch.addEventListener('input', () => {
   }
 });
 
+// Mobile only: tapping into the search box collapses the Quick Look button
+// list down to just the search box + results (see #quickLookButtons/
+// .searchMode in the CSS) - a lighter "search popup" instead of the full
+// panel, with the X (now always visible while in this mode) acting as an
+// easy way to back out via clearCountrySearch.
+countrySearch.addEventListener('focus', () => {
+  if (!isMobile()) return;
+  continentPanelEl.classList.add('searchMode');
+  countrySearchClear.style.display = 'block';
+});
+
 countrySearchClear.addEventListener('click', clearCountrySearch);
 
 // --- Fire spread predictions: projected location N days out (gated by the Prediction toggle, run on country search) ---
@@ -1241,6 +1305,27 @@ const predictionToggle = document.getElementById('predictionToggle');
 const predictionPanel = document.getElementById('predictionPanel');
 const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
+const addressPanel = document.getElementById('addressPanel');
+
+// On mobile there's only room for one of predictionPanel/addressPanel in the
+// shared bottom slot, so a running prediction REPLACES "Am I in danger?"
+// instead of stacking above it, swapping back once cleared. Toggled via the
+// .hiddenMobile class (opacity/transform, not display:none) so the two can
+// cross-fade instead of one instantly popping as the other vanishes -
+// display changes aren't animatable. Desktop keeps the original behavior
+// (predictionPanel's own display:block/none, addressPanel always visible)
+// since there's room for both side by side there.
+function setPredictionPanelVisible(visible) {
+  if (isMobile()) {
+    predictionPanel.style.display = 'block';
+    predictionPanel.classList.toggle('hiddenMobile', !visible);
+    addressPanel.classList.toggle('hiddenMobile', visible);
+  } else {
+    predictionPanel.style.display = visible ? 'block' : 'none';
+    predictionPanel.classList.remove('hiddenMobile');
+    addressPanel.classList.remove('hiddenMobile');
+  }
+}
 const predictionDaysSlider = document.getElementById('predictionDaysSlider');
 const predictionDaysLabel = document.getElementById('predictionDaysLabel');
 const predictionStrengthSlider = document.getElementById('predictionStrengthSlider');
@@ -1411,7 +1496,7 @@ function clearPredictions() {
   world.pathsData(predictionPaths);
   lastClusters.forEach(c => { c.faded = false; });
   updateFireSprites(lastClusters);
-  predictionPanel.style.display = 'none';
+  setPredictionPanelVisible(false);
 }
 
 // Fetches elevation for `points` (grouped in fixed-size chunks of `perGroup`
@@ -1502,7 +1587,7 @@ async function runCountryPredictions(country, fires) {
   const abortController = new AbortController();
   predictionAbortController = abortController;
   const signal = abortController.signal;
-  predictionPanel.style.display = 'block';
+  setPredictionPanelVisible(true);
 
   if (fires.length === 0) {
     predictionInfo.innerHTML = `<p>No active fires detected in ${country.name}.</p>`;
