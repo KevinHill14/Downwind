@@ -13,12 +13,7 @@
     border-radius: 8px; font-size: 13px;
   }
   #optimizePanel {
-    /* Fixed width, not auto-sized to content - without this, the panel's
-       width tracked whichever row's label/value text happened to be
-       longest at the moment (e.g. "1: Basic" vs "4: Max accuracy"), so
-       switching a slider value visibly resized the whole box. 260px
-       comfortably fits the longest row ("Show minor ground fires" + the
-       toggle) with room to spare. */
+    /* Fixed width so switching slider values doesn't resize the box. */
     position: absolute; top: 16px; right: 16px; z-index: 10; width: 260px;
     box-sizing: border-box;
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 14px;
@@ -55,8 +50,6 @@
   .rangeSlider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
 
   #continentPanel {
-    /* Moved up near the top status box instead of vertically centered -
-       #status sits above it at top:16px, so 66px clears it with a margin. */
     position: absolute; left: 16px; top: 66px; z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
@@ -71,9 +64,7 @@
   #resetZoomBtn:hover { background: #e25822; border-color: #e25822; }
 
   #continentPanel hr { width: 100%; border: none; border-top: 1px solid #444; margin: 4px 0; }
-  /* Grouped so mobile search-mode can collapse the whole Quick Look button
-     stack as a single animated block (see below) instead of yanking each
-     child away with its own instant display:none. */
+  /* Wrapped so mobile search-mode can collapse it as one animated block. */
   #quickLookButtons { display: flex; flex-direction: column; gap: 6px; }
   #countrySearchWrap { position: relative; display: flex; }
   #countrySearch {
@@ -169,20 +160,14 @@
     100% { transform: translateX(350%); }
   }
 
-  /* Mobile-only panel toggles (Quick Look / Optimize) - hidden entirely on
-     desktop via the media query below, so they cost nothing there beyond
-     two inert DOM nodes. */
+  /* Mobile-only Quick Look / Optimize toggle buttons; hidden on desktop. */
   .mobilePanelToggle { display: none; }
 
-  /* Everything past this point only applies at phone/small-tablet widths -
-     desktop layout/behavior above is completely untouched, so this can't
-     regress anything there. Quick Look and Optimize (the two heaviest,
-     most settings-like panels) collapse behind small toggle buttons and
-     stay closed by default, since together they're taller than most phone
-     screens; "Am I in danger?" stays visible since it's the core feature,
-     just made full-width and more compact. */
+  /* Phone/tablet layout only - desktop above is untouched. Quick Look and
+     Optimize collapse behind toggle buttons and start closed; "Am I in
+     danger?" stays visible since it's the core feature. */
   @media (max-width: 820px) {
-    #disclaimerBar { display: none; } /* no room for it once panels go full-width; still shown on desktop */
+    #disclaimerBar { display: none; }
 
     .mobilePanelToggle {
       display: flex; align-items: center; justify-content: center;
@@ -193,10 +178,7 @@
     #continentToggle { top: 16px; left: 16px; }
     #optimizeToggle { top: 16px; right: 16px; }
 
-    /* Centered at the top between the two corner toggle buttons instead of
-       stacked under the left one - a dedicated top-middle slot reads more
-       like a persistent status bar than something competing with Quick
-       Look's icon for the same corner. */
+    /* Centered top-middle, between the two corner toggle buttons. */
     #status {
       font-size: 11.5px; padding: 6px 10px; top: 16px; left: 50%; right: auto;
       transform: translateX(-50%); max-width: calc(100vw - 132px);
@@ -212,12 +194,7 @@
     #optimizePanel { right: 16px; }
 
     /* Search mode: tapping the search box collapses the continent-button
-       list (Reset Zoom, the 7 continents, both <hr>s) down to nothing,
-       leaving just the search box + results - a lighter "search popup"
-       rather than the full Quick Look list. Animated as one block (see
-       #quickLookButtons above) so it reads as a single smooth collapse
-       instead of every child vanishing separately.
-       #quickLookButtons */
+       list down to just the search box + results. */
     #quickLookButtons {
       overflow: hidden; transition: max-height 0.22s ease, opacity 0.18s ease, margin-top 0.22s ease;
       max-height: 400px; opacity: 1;
@@ -225,10 +202,8 @@
     #continentPanel.searchMode #quickLookButtons {
       max-height: 0; opacity: 0; margin-top: -6px; pointer-events: none;
     }
-    /* Normally only shown once text is typed (see the input listener) -
-       while actively in search mode it stays visible even with an empty
-       box, since it's now doubling as "Cancel" (exits search mode, not
-       just clears text). */
+    /* The X doubles as "Cancel" in search mode, so it stays visible even
+       with an empty box (normally it only shows once text is typed). */
     #continentPanel.searchMode #countrySearchClear {
       display: block !important;
       transition: color 0.15s ease;
@@ -240,12 +215,8 @@
       transition: opacity 0.2s ease, transform 0.2s ease;
     }
     #addressPanel { bottom: 12px; }
-    /* Fire spread predictions replace "Am I in danger?" in the same bottom
-       slot on mobile rather than stacking above it - there isn't room for
-       both on a phone screen, and only one is ever relevant at a time
-       (mid-prediction vs. idle). Toggled via the .hiddenMobile class (see
-       setPredictionPanelVisible) instead of display:none so the swap can
-       fade/slide instead of popping. */
+    /* Predictions replace "Am I in danger?" in the same slot on mobile -
+       no room for both. See setPredictionPanelVisible. */
     #addressPanel.hiddenMobile, #predictionPanel.hiddenMobile {
       opacity: 0; transform: translateY(8px); pointer-events: none;
     }
@@ -355,26 +326,18 @@
 
 <script src="https://unpkg.com/globe.gl"></script>
 <script src="https://unpkg.com/topojson-client@3"></script>
-<!-- type="module" so the fire-sprite layer can `import` its own three.js
-     instance directly, scoped to just this code - NOT window.THREE.
-     globe.gl (>=2.46, requires three >=0.179) bundles its own internal
-     three.js and never reads window.THREE unless something else set it
-     first; defining window.THREE ourselves previously broke globe.gl
-     globally because it picked up an incompatible three.js version for its
-     OWN rendering instead of its safe internal fallback. Importing three
-     as a separate module avoids that entirely: three.js's renderer uses
-     duck-typed flags (isPoints/isMesh/isObject3D) rather than instanceof
-     checks, so an Object3D built from this module's THREE still works fine
-     when added to globe.gl's scene via customThreeObject. -->
+<!-- type="module" so the fire-sprite layer imports its own scoped three.js
+     instance, NOT window.THREE - setting window.THREE globally previously
+     broke globe.gl's own rendering (it picked up an incompatible version
+     instead of its safe internal fallback). Works fine via customThreeObject
+     since three.js's renderer uses duck-typed flags, not instanceof. -->
 <script type="module">
 import * as THREE from 'https://unpkg.com/three@0.185.1/build/three.module.js';
 const statusEl = document.getElementById('status');
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-// Mirrors the @media (max-width: 820px) breakpoint used throughout the CSS -
-// mobile-only JS behavior checks this instead of hardcoding the number a
-// second time.
+// Mirrors the @media (max-width: 820px) breakpoint in the CSS.
 function isMobile() { return window.matchMedia('(max-width: 820px)').matches; }
 
 // Fire severity scale: log-normalized so a handful of very intense fires
@@ -384,28 +347,16 @@ function intensityT(frp) {
   return clamp(Math.log1p(frp) / Math.log1p(FRP_SCALE_REF), 0, 1);
 }
 
-// Severity color: 4 discrete buckets (yellow/orange/red/extreme), not a
-// computed gradient - cheaper to evaluate per-marker and matches how other
-// fire trackers bucket intensity for a quick glance instead of a precise
-// reading. yellow/orange/red are on the log-normalized 0-1 scale
-// (intensityT), but that scale clamps at FRP_SCALE_REF (150 MW) - every
-// fire from "barely 150 MW" up to a 2000+ MW megafire previously rendered
-// as the exact same red, which made genuinely extreme fires visually
-// indistinguishable from ones an order of magnitude weaker. "Extreme" is
-// checked against the raw FRP directly (not the clamped t), using the same
-// 150 MW value the scale already treats as "maximum severity" - about the
-// top 0.4% of fires worldwide right now.
+// Severity color: 4 discrete buckets, not a gradient - cheaper per-marker
+// and reads at a glance. Extreme/catastrophic check raw FRP directly (not
+// the clamped 0-1 scale) so megafires don't render identically to a fire
+// that's merely at the "max severity" reference point.
 const SEVERITY_YELLOW = [255, 221, 51];
 const SEVERITY_ORANGE = [255, 140, 20];
 const SEVERITY_RED = [200, 30, 20];
-const SEVERITY_EXTREME = [110, 0, 0]; // dark red - distinctly darker than SEVERITY_RED, not just "more saturated"
-// Dark purple, the way storm-severity weather maps reserve purple for their
-// single worst category above red - reserved for the fires that are
-// essentially fully out of control, a notch past "extreme."
-const SEVERITY_CATASTROPHIC = [74, 0, 92];
+const SEVERITY_EXTREME = [110, 0, 0];
+const SEVERITY_CATASTROPHIC = [74, 0, 92]; // dark purple, past "extreme"
 const EXTREME_FRP_THRESHOLD = FRP_SCALE_REF;
-// 3x the "maximum severity" reference point - roughly the top ~0.05% of
-// fires worldwide, reserved for genuine megafires (multi-hundred-MW+).
 const CATASTROPHIC_FRP_THRESHOLD = FRP_SCALE_REF * 3;
 function severityBucket(frp) {
   if (frp >= CATASTROPHIC_FRP_THRESHOLD) return SEVERITY_CATASTROPHIC;
@@ -416,21 +367,15 @@ function severityBucket(frp) {
   return SEVERITY_RED;
 }
 
-// Dimmed version of a severity color, used for a fire's old position once a
-// prediction has been run for it (the new predicted position gets the
-// normal, full-brightness marker instead).
+// Dimmed severity color, used for a fire's old position once predicted.
 const FADE_DARK = 40;
 function fadeRgb([r, g, b]) {
   return [lerp(r, FADE_DARK, 0.75), lerp(g, FADE_DARK, 0.75), lerp(b, FADE_DARK, 0.75)];
 }
 
-// Fire markers render as a single THREE.Points sprite cloud instead of
-// per-marker 3D meshes: one small circular texture, one draw call for every
-// marker on screen regardless of count. This replaced a merged-cylinder-mesh
-// point layer (already batched to one draw call, but each marker still cost
-// dozens of vertices) - a point sprite costs a single vertex, so the win
-// scales with marker count. Tradeoff: no built-in hover tooltip (that relied
-// on three-globe's mesh raycasting), dropped intentionally - not needed.
+// Fire markers render as a single THREE.Points sprite cloud (one draw call
+// for every marker) rather than per-marker meshes - much cheaper at scale.
+// Tradeoff: no hover tooltip (relied on mesh raycasting), dropped intentionally.
 function makeCircleSpriteTexture() {
   const size = 64;
   const canvas = document.createElement('canvas');
@@ -449,7 +394,7 @@ function makeCircleSpriteTexture() {
 }
 
 const FIRE_SPRITE_ALTITUDE = 0.01;
-const FIRE_SPRITE_SIZE = 1.0; // world units; 33% smaller than the original 1.5, per request
+const FIRE_SPRITE_SIZE = 1.0;
 
 const fireSpritesGeometry = new THREE.BufferGeometry();
 const fireSpritesMaterial = new THREE.PointsMaterial({
@@ -463,9 +408,7 @@ const fireSpritesMaterial = new THREE.PointsMaterial({
 });
 const fireSpritesObject = new THREE.Points(fireSpritesGeometry, fireSpritesMaterial);
 
-// Rebuilds the sprite cloud's position/color buffers from the current set of
-// markers (fire clusters, optionally mixed with predicted-position markers).
-// Replaces every world.pointsData(...) call the old mesh-based layer used.
+// Rebuilds the sprite cloud's position/color buffers from the current markers.
 function updateFireSprites(markers) {
   const positions = new Float32Array(markers.length * 3);
   const colors = new Float32Array(markers.length * 3);
@@ -484,9 +427,8 @@ function updateFireSprites(markers) {
   fireSpritesGeometry.computeBoundingSphere();
 }
 
-// The "Am I in danger?" address marker - same sprite technique as the fire
-// cloud (one texture, one point), just its own tiny 0-or-1-point buffer and
-// a distinct color, so it doesn't get mixed up with fire severity coloring.
+// The "Am I in danger?" address marker - same sprite technique, its own
+// 0-or-1-point buffer and a distinct color.
 const HOME_MARKER_ALTITUDE = 0.012;
 const HOME_MARKER_SIZE = 2.5;
 const HOME_MARKER_COLOR = [80, 170, 255]; // blue - unambiguously "not a fire"
@@ -518,11 +460,9 @@ function clearHomeMarker() {
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
-  // Fire markers AND the home marker are NOT globe.gl points layers - see
-  // updateFireSprites()/updateHomeMarker() above. Two custom-object data
-  // entries host both sprite clouds so each is parented/positioned
-  // correctly under the globe, but their buffers are filled directly, not
-  // through globe.gl's own per-datum reactive update path.
+  // Custom objects host the two sprite clouds under the globe - their
+  // buffers are filled directly (see updateFireSprites/updateHomeMarker),
+  // not through globe.gl's per-datum update path.
   .customLayerData([{ obj: fireSpritesObject }, { obj: homeMarkerObject }])
   .customThreeObject(d => d.obj)
   .customThreeObjectUpdate(() => {})
@@ -538,29 +478,20 @@ const world = Globe()
   .arcEndLng(d => d.endLng)
   .arcColor(() => '#ffffff')
   .arcStroke(0.075)
-  .arcAltitude(0.008) // fixed, not auto-scaled - these spread distances are short
-  // enough (tens to low-hundreds of km) that auto altitude flattened arcs
-  // right onto the surface and they z-fought with the globe texture
+  .arcAltitude(0.008) // fixed, not auto-scaled - auto flattened arcs onto the surface (z-fighting)
   .arcsTransitionDuration(0)
-  // Multi-point trajectory for prediction strength 2+ (hourly-stepped path,
-  // bending as the wind shifts), as opposed to the single straight arc
-  // strength 1 uses.
+  // Multi-point trajectory for prediction strength 2+ (hourly-stepped,
+  // bends with wind), vs. the single straight arc strength 1 uses.
   .pathsData([])
   .pathPoints(d => d.points)
   .pathPointLat(p => p[0])
   .pathPointLng(p => p[1])
   .pathPointAlt(0.008)
   .pathColor(() => '#ffffff')
-  // Unlike arcStroke (a globe-relative tube radius), pathStroke is a
-  // screen-space pixel width - the two aren't the same unit, so this isn't
-  // tuned to match arcStroke's value.
-  .pathStroke(1)
+  .pathStroke(1) // screen-space pixels, not the same unit as arcStroke
   .pathTransitionDuration(0)
-  // Country name labels only - a handful of TextGeometry objects (capped,
-  // see updateCountryLabels), nothing like the per-fire "!" labels that
-  // caused the old zoom-in lag (those rebuilt hundreds of glyphs on every
-  // zoom-tier change; this rebuilds at most COUNTRY_LABEL_CAP of them, and
-  // only when the visible set actually changes).
+  // Country name labels - capped and only rebuilt when the visible set
+  // changes (see updateCountryLabels).
   .labelsData([])
   .labelLat(d => d.lat)
   .labelLng(d => d.lng)
@@ -589,54 +520,31 @@ window.world = world;
 // size. This is one of the biggest single wins for drag/orbit smoothness.
 world.renderer().setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
-// three-globe's sphere has a fixed radius of 100 units, and OrbitControls
-// has no minimum zoom distance by default - nothing stops the camera from
-// dollying all the way down to (or past) the surface. A trackpad pinch
-// gesture in particular can zoom several times faster per input event than
-// a mouse wheel notch, and reliably drove the camera to distance ~100.05
-// (pointOfView altitude ~0.0005, i.e. a hair above the surface) in testing -
-// close enough that the near clip plane and the globe mesh itself black out
-// the view entirely. That's the actual cause of "zoom goes black, comes
-// back once I stop" - not a state bug, just an unclamped zoom range.
-// 100.5 (altitude floor ~0.005) is 10x further from the surface than the
-// altitude that actually broke rendering, while still comfortably inside
-// the app's own finest zoom tier (see gridForAltitude, which applies its
-// closest-detail grid at any altitude <= 0.015).
+// OrbitControls has no default zoom limits - unclamped, a fast pinch zoom
+// could dolly the camera into (or past) the sphere's surface, which blacked
+// out the whole view (near clip plane + globe mesh). minDistance keeps a
+// safety margin above the surface (globe radius 100); maxDistance stops a
+// stray zoom-out from flying absurdly far past the default framing.
 world.controls().minDistance = 100.5;
-// Generous but not unbounded - keeps a stray zoom-out from flying the
-// camera absurdly far past the default whole-earth framing (altitude 2.2).
 world.controls().maxDistance = 1200;
 
 
-// Groups fires within gridDeg of each other into a single marker, purely to
-// reduce visual clutter - the underlying detections are kept (in `.fires`)
-// rather than discarded, so nothing about the data is lost, only how
-// densely-packed detections are displayed. The grid size scales with camera
-// altitude (see gridForAltitude): coarse/few clusters at whole-earth zoom
-// where thousands of individual points would be both unreadable and slow to
-// render, fine-grained detail once zoomed into a region - the same
-// zoom-dependent level-of-detail technique 2D map tools use to stay fast.
+// Groups nearby fires into one marker for legibility - underlying detections
+// are kept in `.fires`, nothing is discarded. Grid size scales with camera
+// altitude: coarse at whole-earth zoom, fine once zoomed into a region.
 function gridForAltitude(altitude) {
-  if (altitude > 1.2) return 2.0; // whole-earth view - a handful of regional blobs
+  if (altitude > 1.2) return 2.0;
   if (altitude > 0.6) return 0.5;
   if (altitude > 0.2) return 0.15;
-  if (altitude > 0.05) return 0.05; // country-scale - ~5.5km, used to be the finest tier
-  // Below country-scale, clustering keeps getting finer instead of
-  // plateauing at 5.5km, so zooming into a searched country keeps revealing
-  // more individual fires rather than hitting an invisible ceiling.
+  if (altitude > 0.05) return 0.05; // ~5.5km
   if (altitude > 0.015) return 0.015; // ~1.7km
-  return 0.003; // ~330m - close to VIIRS' own ~375m pixel size, i.e. near-individual detections
+  return 0.003; // ~330m, near VIIRS' own pixel size
 }
 
-// A fire at or above this (~the orange/red color boundary - see
-// severityBucket/intensityT above, t=2/3 works out to ~27.4 MW, the top
-// ~8-10% most intense fires worldwide) renders as its own marker and skips
-// grid grouping entirely - a genuinely major fire can't get visually
-// diluted or hidden by nearby small ones just because they land in the
-// same cell. A lower cutoff (the orange/yellow boundary, ~4.3 MW) was tried
-// first and rejected - that's below the MEDIAN fire's intensity, so it
-// "protected" over 60% of all fires and made clustering barely reduce
-// marker count at all. Keep in sync with LARGE_FIRE_MIN_FRP in main.py.
+// A fire at or above this (~orange/red boundary, top ~8-10% worldwide)
+// renders as its own marker, skipping grid grouping entirely, so a major
+// fire can't get visually diluted by nearby small ones. Keep in sync with
+// LARGE_FIRE_MIN_FRP in main.py.
 const LARGE_FIRE_MIN_FRP = 27.4;
 
 function clusterFires(fires, gridDeg) {
@@ -673,12 +581,9 @@ function updateArcsLayer() {
   world.arcsData(predictionArcs);
 }
 
-// Plain white line from each predicted fire's original position to its
-// projected one - solid, no dash/animation (dashed arcs weren't rendering
-// visibly on this three-globe version, see ideas.txt history). Strength 1
-// uses a single straight arc (predictionArcs); strength 2+ uses a bent,
-// hourly-stepped multi-point path instead (predictionPaths) - only one of
-// the two is populated at a time.
+// Strength 1 uses a single straight arc (predictionArcs above); strength 2+
+// uses a bent, hourly-stepped multi-point path instead - only one is
+// populated at a time.
 let predictionPaths = [];
 
 let lastRenderedFires = [];
@@ -686,12 +591,9 @@ let lastClusters = [];
 
 function renderFireMarkers(fires, altitudeOverride) {
   lastRenderedFires = fires;
-  // world.pointOfView().altitude reflects the camera's CURRENT position,
-  // which mid-flyTo is some in-between value, not the destination - reading
-  // it right after a country search (before the 1s flight finishes) picked
-  // the wrong cluster grid size and threw off cluster centroids. Callers
-  // that know the real target altitude (e.g. a just-searched country) pass
-  // it explicitly instead of relying on a live camera read.
+  // Mid-flyTo, the live camera altitude is an in-between value, not the
+  // destination - callers that know the real target altitude pass it
+  // explicitly instead.
   const altitude = altitudeOverride ?? world.pointOfView().altitude;
   const gridDeg = gridForAltitude(altitude);
   currentZoomTier = gridDeg;
@@ -700,117 +602,67 @@ function renderFireMarkers(fires, altitudeOverride) {
 }
 
 // For fires the backend already aggregated (see loadFires' `grid` param) -
-// each item already has {lat,lng,count,totalFrp,maxFrp},
-// the exact shape clusterFires() would have produced, so there's no
-// client-side re-clustering step (skips both that compute cost and having
-// to ship every raw detection to the browser just to immediately fold them
-// back together).
+// already in clusterFires()'s output shape, so no client-side re-clustering.
 function renderPreClusteredMarkers(clusters) {
   lastClusters = clusters;
   updateFireSprites(lastClusters);
 }
 
-// Re-cluster (not re-fetch) whenever the camera crosses into a different
-// zoom tier, so the marker count adapts to what's actually legible/fast at
-// the current view without hitting the network again. Zooming around no
-// longer clears an active prediction - the re-clustered markers won't carry
-// the old faded/predicted state, so if a prediction was showing, it's
-// re-run against the fresh clusters instead of just dropped.
+// Re-cluster (not re-fetch) whenever the camera crosses a zoom tier, so
+// marker density adapts without hitting the network. If a prediction was
+// showing, it's re-run against the fresh clusters instead of dropped.
 let currentZoomTier = null;
 
-// Whether a country search is the active view - country search stays
-// authoritative over whatever's rendered while one is active, since
-// loadCountryFires already fetched that country's complete fire set.
+// Whether a country search is the active view - stays authoritative over
+// what's rendered, since loadCountryFires already fetched the full set.
 let inCountryView = false;
 
-// Density/render cost is controlled SOLELY by the Detail level slider now,
-// not by camera altitude. An earlier version re-fetched and re-clustered at
-// a finer server-side grid the closer you zoomed in ("viewport mode") - in
-// testing that made close zoom both slower (near-individual-detection
-// cluster counts) and visually worse (clusters snap to a visible grid at
-// fine resolutions, looking artificial). Camera zoom is now purely visual:
-// the same slider-controlled cluster set stays rendered regardless of how
-// close the camera gets, so panning/zooming around the globe never
-// triggers a new fetch or a render cost change.
+// Density/render cost is controlled solely by the Detail level slider, not
+// camera altitude - panning/zooming never triggers a new fetch or re-cluster.
 
-// "Show small fires" toggle: off by default. Below this FRP (MW), a fire is
-// a flat intensity floor, not a rank-based cap - a fire either clears
-// MIN_FRP_THRESHOLD or it doesn't, regardless of how it compares to fires
-// elsewhere, so this doesn't reintroduce the "real regional fire loses out
-// to stronger fires on the other side of the world" problem a top-N cap
-// caused earlier. ~25th percentile of current worldwide FRP, so it trims
-// the weakest quarter of detections (the ones nobody's actually looking
-// for) without touching anything a person would call "a real fire."
-// Country search intentionally ignores this - that mode exists specifically
-// for full detail on a place you've already chosen to drill into.
+// "Show small fires" toggle: off by default. A flat FRP floor (not a
+// top-N cap, which let real fires lose out to stronger ones elsewhere).
+// ~25th percentile of current worldwide FRP. Country search ignores this.
 const MIN_FRP_THRESHOLD = 3;
 const smallFiresToggle = document.getElementById('smallFiresToggle');
 function currentMinFrp() {
   return smallFiresToggle.checked ? null : MIN_FRP_THRESHOLD;
 }
 
-// "l" (low) confidence is excluded server-side unconditionally, always -
-// this is only the EXTRA restriction "Show small fires" off adds: high
-// confidence only, not just "not low", so what's left skews toward real
-// forest fires NASA is actually sure about rather than every marginal
-// nominal-confidence detection.
+// "l" (low) confidence is always excluded server-side - this is the EXTRA
+// restriction "Show small fires" off adds (high confidence only).
 function currentMinConfidence() {
   return smallFiresToggle.checked ? null : 'h';
 }
 
-// Ground-sourced fires (Canada, see main.py) carry a real hectares-burned
-// number satellite detections don't have, so this is a separate axis from
-// "Show small fires" above (which only reasons about FRP). Off by default
-// means "everything" - matches this app's general no-caps stance. On
-// (checked) shows every ground-reported fire regardless of size; off
-// restricts to "significant" ones, for comparing against other trackers
-// that only surface a handful of the largest fires per region (confirmed
-// directly against firerisk.ai: their smallest shown Manitoba fire was
-// ~40ha, everything below that was just absent from their map, not merged
-// or deprioritized - a hard cutoff, not a cap in the sense this app
-// otherwise avoids).
+// Ground-sourced fires (Canada, see main.py) have a real hectares-burned
+// number, a separate axis from "Show small fires" (FRP-only). On (default)
+// shows everything; off restricts to fires >=40ha, matching what comparable
+// trackers like firerisk.ai actually surface.
 const MIN_GROUND_FIRE_HECTARES = 40;
 const minorGroundFiresToggle = document.getElementById('minorGroundFiresToggle');
 function currentMinHectares() {
   return minorGroundFiresToggle.checked ? null : MIN_GROUND_FIRE_HECTARES;
 }
 
-// Reacting to camera movement is polled, not event-driven off
-// world.controls()'s 'change' event - that event only fires reliably for
-// direct mouse drag/scroll on OrbitControls. world.pointOfView() (used by
-// the Quick Look continent buttons and every country-search flyTo) moves
-// the camera via three-globe's own tween and does NOT reliably dispatch
-// 'change', so anything wired only to that event silently never ran after
-// those actions - country labels never updated after a button click unless
-// you happened to manually drag/scroll afterward. Polling checks the real
-// camera state directly, so it works the same regardless of how the camera
-// got there. Each check below is itself cheap/bucket-gated (see
-// updateCountryLabels), so polling a few times a second costs effectively
-// nothing when nothing's actually changed.
-// Labels are hidden for the ENTIRE duration of any camera motion - manual
-// drag/zoom AND programmatic flyTo alike, since both are driven through the
-// same polled pointOfView() reads - and only rebuilt once the camera has
-// been still for a couple of consecutive polls. Building label text meshes
-// is the most expensive thing redrawn per update, so this removes that cost
-// from every moving frame instead of just drag (an OrbitControls
-// 'start'/'end' listener only sees direct mouse drag, not a Quick
-// Look/search flyTo tween, so it missed exactly the case where a "smooth
-// animation" is now expected too).
+// Polled rather than event-driven: OrbitControls' 'change' event doesn't
+// reliably fire for world.pointOfView() tweens (Quick Look buttons, search
+// flyTo), only direct drag/scroll - polling works the same regardless of
+// how the camera moved. Labels are hidden for the whole duration of any
+// motion (drag or flyTo alike) and only rebuilt once the camera's been
+// still for a couple of polls, since building label text meshes is the
+// most expensive thing redrawn per update.
 const MOTION_EPS = 0.01;
-const STABLE_TICKS_TO_SHOW_LABELS = 1; // ~200ms of no movement before labels reappear (1 tick of the 200ms poll below)
+const STABLE_TICKS_TO_SHOW_LABELS = 1; // ~200ms of stillness before labels reappear
 let lastMotionPov = null;
 let motionStableTicks = 0;
 let labelsHiddenForMotion = false;
 
-// Zoom (mouse wheel / trackpad pinch) doesn't wait for the next 250ms poll
-// tick to hide labels - it drops them on the very first wheel event of a
-// gesture instead. Continuous zoom input fires far faster than the poll
-// (a trackpad pinch is ~60 events/sec), and label text meshes are expensive
-// enough to redraw that leaving them in for even one un-hidden poll window
-// was enough to make the render loop fall behind and show a black/blank
-// frame until it caught up - reported as "zoom goes black, comes back once
-// I stop." Zooming out never needs the label set anyway (labels only
-// reappear once fully stopped), so there's no risk in hiding eagerly here.
+// Zoom hides labels on the very first wheel event instead of waiting for
+// the next poll tick - a fast pinch zoom fires far more often than the
+// poll, and leaving labels in for even one tick was enough to stall the
+// render loop into a black/blank frame ("zoom goes black, comes back once
+// I stop").
 document.getElementById('globeViz').addEventListener('wheel', () => {
   motionStableTicks = 0;
   if (!labelsHiddenForMotion) {
@@ -845,33 +697,18 @@ function watchForBrokenCamera() {
 }
 requestAnimationFrame(watchForBrokenCamera);
 
-// Hand-rolling this animation (calling pointOfView(pov, 0) every frame to
-// manually interpolate) was tried TWICE - once disabling OrbitControls for
-// the flight's duration, once pinning controls.target to the globe center
-// on every frame - and both times it broke ALL dragging afterward,
-// permanently, with the same transient NaN in the camera's raw position
-// during the first couple of frames each time. Since that never happens
-// with the built-in transition, the manual per-frame pointOfView() calls
-// are corrupting something in three-globe's own internal state beyond just
-// controls.enabled or controls.target - not practical to fully root-cause
-// without digging into its (minified) internals. Staying on the built-in
-// world.pointOfView(target, ms) for good: it may not always animate
-// visibly, but it never breaks dragging, which matters far more.
+// Manually interpolating this animation frame-by-frame was tried and
+// reliably broke all dragging afterward (three-globe internal state
+// corruption, not fully root-caused). Staying on the built-in
+// world.pointOfView(target, ms) tween for good.
 //
-// Flights are also queued rather than fired immediately: starting one
-// while a PREVIOUS one is still mid-tween (e.g. clicking search-clear right
-// after selecting a country, before that 1000ms flyTo finishes) is a
-// plausible reason the built-in tween sometimes plays cleanly and sometimes
-// doesn't - two overlapping calls fighting over the same tween state. Each
-// flight now waits for any prior one's tracked end time, plus a small fixed
-// settle buffer, before actually starting.
+// Flights are queued, not fired immediately: two overlapping tweens (e.g.
+// search-clear right after selecting a country) fight over the same tween
+// state, so each flight waits for any prior one's tracked end time first.
 const FLIGHT_SETTLE_BUFFER_MS = 100;
 let lastFlightEndsAt = 0;
-// Returns the total ms until this flight will have finished (queue delay +
-// its own duration), so callers with work that needs to wait for the
-// animation to actually be done (e.g. clearCountrySearch's loadFires) can
-// schedule off the real completion time instead of just the flight's own
-// nominal duration.
+// Returns total ms until this flight finishes (queue delay + duration), so
+// callers can schedule follow-up work off the real completion time.
 function flyToPointOfView(target, durationMs) {
   const now = performance.now();
   const delay = Math.max(0, lastFlightEndsAt - now) + FLIGHT_SETTLE_BUFFER_MS;
@@ -936,11 +773,9 @@ function ringArea(ring) {
   return Math.abs(area / 2);
 }
 
-// Bounding-box center/extent of a country's MAIN landmass, used to fly the
-// camera to it. Countries with far-flung territories (e.g. France with
-// French Guiana, the Netherlands, the UK) are MultiPolygons - averaging
-// across every part would land the camera in open ocean between them, so
-// we only use the largest polygon by area.
+// Bounding-box center/extent of a country's main landmass (largest polygon
+// by area) - averaging across every part of a MultiPolygon (e.g. France
+// with French Guiana) would land the camera in open ocean between them.
 function boundsOf(feature) {
   const geom = feature.geometry;
   const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
@@ -981,11 +816,9 @@ function pointInRing(lat, lng, ring) {
   return inside;
 }
 
-// Whether (lat, lng) falls inside a country's actual GeoJSON shape (Polygon
-// or MultiPolygon, respecting holes) - not just its bounding box. A
-// bounding-box fetch alone lets fires from neighboring countries through
-// (e.g. France's rectangle overlaps parts of Switzerland/Germany/Italy);
-// this is the precise filter applied on top of that fetch.
+// Whether (lat, lng) falls inside a country's actual GeoJSON shape
+// (respecting holes), not just its bounding box - filters out neighboring
+// countries' fires that a bbox fetch alone would let through.
 function pointInCountryGeometry(lat, lng, geometry) {
   const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
   for (const polygon of polygons) {
@@ -1020,14 +853,10 @@ function ringCentroid(ring) {
   return { lng: cx / (6 * area), lat: cy / (6 * area) };
 }
 
-// Where to actually draw a country's name label. The bounding-box center
-// (used for camera flyTo) is wrong for this - it's the midpoint of the
-// country's extent, not a point inside its shape, so anything concave or
-// crescent-shaped (Norway, Chile, Vietnam, Croatia...) gets a label that
-// lands in the ocean or in a neighboring country. The polygon centroid is
-// usually inside the shape, but not always for the same reason - so this
-// falls back to scanning a grid across the main polygon's bounding box for
-// the point closest to that centroid that's actually inside the country.
+// Where to draw a country's name label. Bounding-box center (used for
+// camera flyTo) can land in the ocean for concave shapes (Norway, Chile,
+// Vietnam...); polygon centroid is usually better but not always, so this
+// falls back to the in-country grid point closest to the centroid.
 function labelPointFor(feature) {
   const geom = feature.geometry;
   const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
@@ -1119,9 +948,8 @@ async function loadCountryBorders() {
 
   COUNTRY_LIST = countries.map(f => {
     const b = boundsOf(f);
-    // pad the bbox a bit so fires just across a border/coastline aren't missed
-    // by the initial fetch - the precise polygon filter below still excludes
-    // them from the final result if they're genuinely outside the country.
+    // Pad the bbox so border-adjacent fires aren't missed by the initial
+    // fetch; the polygon filter still excludes anything genuinely outside.
     const pad = 0.75;
     const labelPoint = labelPointFor(f);
     return {
@@ -1142,32 +970,19 @@ async function loadCountryBorders() {
 }
 loadCountryBorders();
 
-// A country's name appears once the camera is within LABEL_VISIBILITY_FACTOR
-// times its own "natural framing altitude" (the same c.altitude used to fly
-// to it on search) - large countries (large latSpan/lngSpan -> large
-// altitude) qualify from far away, small ones only once zoomed in close.
-// That's a cheap stand-in for "does it actually fit on screen" without real
-// text measurement. That check alone isn't enough though: it only looks at
-// zoom level, not WHERE the camera is pointed, so zooming in tight on one
-// small country still left it competing for the label cap against every
-// other small country on Earth that also technically "qualifies" at that
-// zoom level. So this also filters to countries within roughly the current
-// viewport, using the camera's look-at point. Gated on a coarse altitude +
-// look-at bucket so it only rebuilds the label set on a meaningful camera
-// change, not every frame of a drag.
-// Raised from 4 - labels were only appearing once zoomed in much closer than
-// they should've been ("a lot of countries have names that should be
-// appearing but are not"). A bigger factor means a label qualifies at a
-// HIGHER altitude (further zoomed out), i.e. a lower effective zoom
-// requirement.
+// A country's label appears once the camera is within LABEL_VISIBILITY_FACTOR
+// times its "natural framing altitude" - large countries qualify from far
+// away, small ones only up close. Also filtered to roughly the current
+// viewport (camera look-at point), so zooming into one small country
+// doesn't make it compete for the cap against every other small country on
+// Earth. Gated on a coarse altitude + look-at bucket so it only rebuilds on
+// a meaningful camera change, not every drag frame.
 const LABEL_VISIBILITY_FACTOR = 6;
-const COUNTRY_LABEL_CAP = 45; // safety cap; keeps the largest/most prominent nearby countries if more would qualify
+const COUNTRY_LABEL_CAP = 45; // safety cap on how many labels can be visible at once
 let lastLabelKey = null;
 
-// Building label geometry (country + water body names) competes with the
-// initial fire render for main-thread time if it happens right away -
-// deferred until the first fire load finishes so startup shows fires first,
-// labels a beat later, instead of both fighting for the same frame.
+// Deferred until the first fire load finishes, so startup shows fires
+// first instead of both fighting for the same frame.
 let initialFiresLoaded = false;
 
 function updateCountryLabels(altitude) {
@@ -1177,23 +992,13 @@ function updateCountryLabels(altitude) {
   if (key === lastLabelKey) return;
   lastLabelKey = key;
 
-  // Rough angular radius of what's currently on screen - shrinks with
-  // altitude, same way the actual visible slice of globe does. A plain
-  // degrees-of-lat/lng distance (not true great-circle) is plenty precise
-  // for "is this roughly in view," and a country's own size is added as
-  // slack so a large country's label doesn't vanish just because its
-  // centroid sits slightly outside the strict radius while the country
-  // itself still spans into view. Capped at 100, not 180 - a sphere only
-  // ever shows one hemisphere (~90 deg from the look-at point) to the
-  // camera no matter how zoomed out; the old 180 cap let every label on the
-  // ENTIRE globe, including the far side facing directly away from the
-  // camera, qualify as "in view" and get built/rendered every time, wasted
-  // work for labels that were never visible in the first place.
+  // Rough angular radius of what's on screen, shrinking with altitude.
+  // Capped at 100, not 180 - a sphere only ever shows one hemisphere to the
+  // camera, so 180 let far-side labels wastefully qualify as "in view."
   const visibleRadiusDeg = clamp(altitude * 90, 6, 100);
 
-  // Countries and water bodies share the exact same qualification logic
-  // (framing-altitude cutoff + viewport proximity) and compete for the same
-  // label cap - a label is a label, regardless of what it's naming.
+  // Countries and water bodies share qualification logic and compete for
+  // the same label cap.
   const visible = COUNTRY_LIST.concat(WATER_BODIES)
     .filter(c => altitude <= c.altitude * LABEL_VISIBILITY_FACTOR)
     .filter(c => {
@@ -1208,10 +1013,8 @@ function updateCountryLabels(altitude) {
       lng: c.labelLng,
       name: c.name,
       color: c.color,
-      // Labels are 3D billboards anchored to the globe surface, so getting
-      // closer already makes them look bigger on screen via perspective -
-      // this needs to shrink WITH altitude (not against it) or a label
-      // balloons to fill the screen once zoomed into a small country.
+      // Shrinks WITH altitude (not against it) - perspective already makes
+      // labels look bigger up close, so this offsets that.
       size: clamp(altitude * 0.9, 0.18, 1.0),
     }));
 
@@ -1229,22 +1032,16 @@ function renderCountryResults(query) {
       const btn = document.createElement('button');
       btn.textContent = c.name;
       btn.addEventListener('click', async () => {
-        // Selecting a result fills the box with the chosen country and
-        // closes the dropdown, instead of leaving the search box empty and
-        // the stale results list still open.
         countrySearch.value = c.name;
         countryResults.innerHTML = '';
-        // Deliberately NOT exiting search mode here (unlike clearCountrySearch)
-        // - on mobile, the compact search popup is what selecting a country
-        // should settle into, not a bounce back to the full Quick Look list.
-        // Only the X (clearCountrySearch) backs all the way out to that.
+        // Not exiting search mode here - on mobile, selecting a country
+        // should settle into the compact popup, not bounce back to the
+        // full panel (only the X does that).
         flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: c.altitude }, 1000);
         const fires = await loadCountryFires(c);
-        // If search-clear (X) fired while that fetch was in flight, it
-        // already set inCountryView back to false and flew the camera back
-        // out - without this check, this resumed chain would start a
-        // prediction for a country the user already backed out of, leaving
-        // one running with an empty search box.
+        // inCountryView guards against search-clear (X) firing while this
+        // fetch was in flight - without it, a stale prediction could start
+        // for a country the user already backed out of.
         if (predictionToggle.checked && inCountryView) {
           runCountryPredictions(c, fires);
         }
@@ -1253,27 +1050,18 @@ function renderCountryResults(query) {
     });
 }
 
-// Search and predictions are linked: clearing one clears the other, since a
-// prediction only ever exists for the currently-searched country.
+// Search and predictions are linked: clearing one clears the other.
 function clearCountrySearch() {
   countrySearch.value = '';
   countryResults.innerHTML = '';
   countrySearchClear.style.display = 'none';
   continentPanelEl.classList.remove('searchMode');
-  // Back to the current world-wide "Fires shown" setting rather than
-  // staying stuck on whatever country was last searched.
   lastPredictedCountry = null;
   lastPredictedFires = null;
   inCountryView = false;
   clearPredictions();
-  // Flies back out to the default whole-earth framing instead of leaving
-  // the camera zoomed in on whatever country was just cleared - a smooth
-  // tween, not an instant jump (see flyToPointOfView - the built-in
-  // world.pointOfView(target, ms) transition wasn't reliably animating from
-  // this specific call site). loadFires() (a full world-wide re-cluster +
-  // sprite rebuild) is deliberately delayed until the flight's own duration
-  // has elapsed instead of firing immediately alongside it, so the heavy
-  // data rebuild doesn't compete with the animation for the same frames.
+  // Flies back to the default framing; loadFires (a full world re-cluster)
+  // is delayed until the flight finishes so it doesn't compete for frames.
   const CLEAR_FLY_MS = 900;
   const totalFlightMs = flyToPointOfView({ lat: 20, lng: 0, altitude: 2.2 }, CLEAR_FLY_MS);
   statusEl.textContent = 'Loading fire data...';
@@ -1283,8 +1071,7 @@ function clearCountrySearch() {
 countrySearch.addEventListener('input', () => {
   const query = countrySearch.value.trim();
   // In mobile search mode the X doubles as "Cancel" and stays visible even
-  // with an empty box (see clearCountrySearch/the focus listener below) -
-  // only fall back to the plain "hide when empty" rule outside that mode.
+  // with an empty box.
   countrySearchClear.style.display = (query || continentPanelEl.classList.contains('searchMode')) ? 'block' : 'none';
   renderCountryResults(query);
   if (!query) {
@@ -1295,11 +1082,8 @@ countrySearch.addEventListener('input', () => {
   }
 });
 
-// Mobile only: tapping into the search box collapses the Quick Look button
-// list down to just the search box + results (see #quickLookButtons/
-// .searchMode in the CSS) - a lighter "search popup" instead of the full
-// panel, with the X (now always visible while in this mode) acting as an
-// easy way to back out via clearCountrySearch.
+// Mobile only: tapping into the search box collapses Quick Look down to
+// just the search box + results (see .searchMode in the CSS).
 countrySearch.addEventListener('focus', () => {
   if (!isMobile()) return;
   continentPanelEl.classList.add('searchMode');
@@ -1308,21 +1092,16 @@ countrySearch.addEventListener('focus', () => {
 
 countrySearchClear.addEventListener('click', clearCountrySearch);
 
-// --- Fire spread predictions: projected location N days out (gated by the Prediction toggle, run on country search) ---
+// --- Fire spread predictions (gated by the Prediction toggle) ---
 const predictionToggle = document.getElementById('predictionToggle');
 const predictionPanel = document.getElementById('predictionPanel');
 const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
 const addressPanel = document.getElementById('addressPanel');
 
-// On mobile there's only room for one of predictionPanel/addressPanel in the
-// shared bottom slot, so a running prediction REPLACES "Am I in danger?"
-// instead of stacking above it, swapping back once cleared. Toggled via the
-// .hiddenMobile class (opacity/transform, not display:none) so the two can
-// cross-fade instead of one instantly popping as the other vanishes -
-// display changes aren't animatable. Desktop keeps the original behavior
-// (predictionPanel's own display:block/none, addressPanel always visible)
-// since there's room for both side by side there.
+// Mobile: a running prediction replaces "Am I in danger?" in the shared
+// bottom slot (only room for one), cross-fading via .hiddenMobile instead
+// of display:none. Desktop keeps both panels visible side by side.
 function setPredictionPanelVisible(visible) {
   if (isMobile()) {
     predictionPanel.style.display = 'block';
@@ -1382,16 +1161,9 @@ predictionStrengthSlider.addEventListener('change', () => {
   }
 });
 
-// Fetches the accurate, full fire set for a country's bbox (the initial world
-// view holds every fire, but pre-clustered at a coarse grid for render speed -
-// see the detail-level slider - so individual small fires in a given country
-// are merged into their cluster rather than shown separately). Renders ONLY
-// this country's fires, replacing whatever was shown
-// before - merging into the accumulated world dataset used to mean a search
-// after "Show all fires" reclustered and predicted on the entire world's
-// fires at the country's fine zoom grid (slow, and predictions landed
-// wherever the globally most intense fires happened to be, not in the
-// searched country).
+// Fetches the accurate, full fire set for a country's bbox (the world view
+// only holds a coarse pre-clustered set) and renders only this country's
+// fires, replacing whatever was shown before.
 async function loadCountryFires(country) {
   inCountryView = true;
   statusEl.textContent = `Loading fires for ${country.name}...`;
@@ -1401,24 +1173,16 @@ async function loadCountryFires(country) {
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
 
-    // The bbox fetch is a rectangle around the country's shape, so it also
-    // pulls in fires from neighboring countries that fall inside that
-    // rectangle but outside the country itself - filter against the actual
-    // polygon to keep only fires genuinely within its borders.
+    // Filter the bbox rectangle down to the actual polygon - it also pulls
+    // in fires from neighboring countries otherwise.
     const fires = json.fires.filter(f => pointInCountryGeometry(f.lat, f.lng, country.geometry));
 
-    // A genuinely new country's fires, not just a re-cluster of the same
-    // data (that's the zoom case, which now preserves predictions instead)
-    // - any prediction from a previously-searched country is stale here.
     lastPredictedCountry = null;
     lastPredictedFires = null;
     clearPredictions();
 
-    // If search-clear (X) fired while this fetch was in flight, inCountryView
-    // is already back to false and the world view is (re)loading - same race
-    // as the prediction-start guard above. Without this, this resumed chain
-    // would render this now-stale country's markers and overwrite "Loading
-    // fire data..." with a status line for a country the user already left.
+    // inCountryView guards the same search-clear race as above - without
+    // it, this resumed chain would render a now-stale country's markers.
     if (inCountryView) {
       renderFireMarkers(fires, country.altitude);
       statusEl.textContent = `${fires.length} active fire detections in ${country.name}`;
@@ -1514,23 +1278,11 @@ function clearPredictions() {
   setPredictionPanelVisible(false);
 }
 
-// Fetches elevation for `points` (grouped in fixed-size chunks of `perGroup`
-// points each, `groupsPerChunk` groups per request), so a single elevation
-// request never exceeds Open-Meteo's ~100-point limit. Chunks fire in
-// PARALLEL (Promise.all), not one-at-a-time - Open-Meteo's elevation
-// endpoint takes ~12-14s per 80-point chunk, and a strength-3+ prediction
-// for a country with many fire clusters easily needs 2+ chunks; awaiting
-// them sequentially meant 25s+ before anything showed up, which read as
-// "broken" even though it would eventually finish.
-//
-// Each chunk's results are matched back to its own points by lat/lng, not
-// by array position - the backend only returns entries for points it
-// actually resolved, so a chunk response can be shorter than the chunk sent
-// (a bad/oceanic point, a transient failure). Matching by position after
-// that would silently pair the WRONG elevation with a point, not just drop
-// one - matching by identity and filling `null` for anything unresolved
-// keeps every point's position in the final array meaningful (downstream
-// code already treats a null entry as "skip this one").
+// Fetches elevation in fixed-size chunks (Open-Meteo's ~100-point limit),
+// fired in parallel rather than sequentially (each chunk can take 12-14s).
+// Results are matched back by lat/lng, not array position - a chunk
+// response can be shorter than what was sent, and matching by position
+// would silently pair the wrong elevation with a point.
 async function fetchElevationInChunks(points, perGroup, groupsPerChunk, signal) {
   const chunkSize = perGroup * groupsPerChunk;
   const chunks = [];
@@ -1573,18 +1325,10 @@ function makePredictedMarker(c, dest, hours, windSpeedKmh) {
   };
 }
 
-// Guards against a stale prediction run clobbering fresh state - clicking
-// the search-clear X (or starting a new country search) while a prediction's
-// wind/elevation fetches are still in flight used to let this function's
-// LATER-resolving code overwrite lastClusters/the fire sprite buffer with
-// stale country data after the user had already moved on, which could leave
-// the render in a broken state. clearPredictions() bumps predictionRunId,
-// invalidating any run that hasn't reached its final write yet, AND aborts
-// its in-flight fetches outright - a superseded run used to keep hammering
-// Open-Meteo (a 7-day hourly-wind prediction is many chunked requests) even
-// after its result was worthless, right at the exact moment a full world
-// reload was ALSO kicking off. That pile-up of simultaneous network/CPU work
-// is the likely cause of the reported black-screen freeze after clicking X.
+// Guards against a stale prediction run clobbering fresh state: clearing
+// search/predictions bumps predictionRunId (invalidating anything still in
+// flight) and aborts its fetches outright, instead of letting a superseded
+// run keep hammering Open-Meteo after its result is worthless.
 let predictionRunId = 0;
 let predictionAbortController = null;
 
@@ -1595,9 +1339,8 @@ async function runCountryPredictions(country, fires) {
   const strength = predictionStrength();
 
   clearPredictions();
-  // Captured AFTER this call's own clearPredictions() (which bumps the
-  // counter to invalidate anything still in flight from before) - otherwise
-  // this run would immediately invalidate itself.
+  // Captured after clearPredictions() bumps the counter, or this run would
+  // immediately invalidate itself.
   const runId = ++predictionRunId;
   const abortController = new AbortController();
   predictionAbortController = abortController;
@@ -1609,21 +1352,17 @@ async function runCountryPredictions(country, fires) {
     return;
   }
 
-  // Predict per currently-displayed marker (cluster), not per raw detection -
-  // that's what's actually visible on screen, and keeps the prediction count
-  // bounded even for a country with hundreds of individual fire detections.
+  // Predict per displayed cluster, not per raw detection - bounds the
+  // count even for a country with hundreds of individual fires.
   const targets = lastClusters
     .slice()
     .sort((a, b) => b.totalFrp - a.totalFrp)
     .slice(0, MAX_PREDICTIONS);
 
   predictionInfo.innerHTML = `<p>Projecting ${hours}hr fire locations for ${targets.length} marker(s) in ${country.name}...</p>`;
-  // Open-Meteo's response time for the wind/elevation lookups varies a lot
-  // by region and load - anywhere from ~4s to 20s+ for the same request
-  // shape, observed directly. A static "Projecting..." message with no
-  // feedback for that whole window reads as frozen, not slow - this ticks
-  // a live elapsed-seconds counter so it's visibly still working. Cleared
-  // in the `finally` block below regardless of how the function exits.
+  // Open-Meteo can take 4-20s+ for the same request shape - a static
+  // message with no feedback reads as frozen, so this ticks a live
+  // elapsed-seconds counter instead.
   const predictionStartedAt = Date.now();
   const progressIntervalId = setInterval(() => {
     const elapsedSec = Math.floor((Date.now() - predictionStartedAt) / 1000);
@@ -1633,11 +1372,8 @@ async function runCountryPredictions(country, fires) {
 
   try {
 
-  // Wind barely varies over ~30km, so markers are grouped onto a coarse grid
-  // and share one wind lookup per cell. All cells are fetched in a single
-  // request (Open-Meteo supports comma-separated lat/lng lists natively) -
-  // firing one request per cell, even in parallel, was the main source of
-  // the slowness for a country with many visible markers.
+  // Wind barely varies over ~30km, so markers share one lookup per grid
+  // cell, all fetched in a single batched request.
   const cellOf = c => `${Math.round(c.lat / WIND_GRID_DEG)},${Math.round(c.lng / WIND_GRID_DEG)}`;
   const cellCenters = new Map();
   targets.forEach(c => {
@@ -1646,13 +1382,9 @@ async function runCountryPredictions(country, fires) {
   });
   const cellEntries = [...cellCenters.entries()];
 
-  // Matches a /api/wind[/forecast]/batch response back to cell keys by the
-  // lat/lng each result actually carries, not by array position - the
-  // backend drops individual points that fail (a bad Open-Meteo entry, a
-  // transient chunk error) rather than padding them out, so a response can
-  // legitimately be shorter than the request. Matching by position after a
-  // drop silently attributes one cell's wind reading to a DIFFERENT cell -
-  // wrong, not just incomplete.
+  // Matches results back to cell keys by lat/lng, not array position - the
+  // backend drops failed points rather than padding them out, so matching
+  // by position would silently attribute the wrong cell's wind reading.
   function matchResultsToCells(results) {
     const pointToCellKey = new Map();
     cellEntries.forEach(([key, c]) => pointToCellKey.set(`${c.lat},${c.lng}`, key));
@@ -1669,8 +1401,7 @@ async function runCountryPredictions(country, fires) {
   const newPaths = [];
 
   if (strength === 1) {
-    // Stage 1: one current-conditions wind snapshot, straight projection -
-    // the original model.
+    // Stage 1: one current-conditions wind snapshot, straight projection.
     let windByCell = new Map();
     if (cellEntries.length > 0) {
       const res = await fetch('/api/wind/batch', {
@@ -1717,13 +1448,9 @@ async function runCountryPredictions(country, fires) {
       }
     }
 
-    // Stage 3: one elevation-based slope multiplier per WIND CELL (not per
-    // marker - same coarse grid as the wind lookup), from a probe point 10km
-    // along the FIRST step's wind direction - cheap (one extra point per
-    // cell), but that also means it goes a bit stale over a multi-day
-    // window if the wind rotates. Stage 4 replaces this with a proper
-    // gradient (see below) that doesn't have that problem; this cheaper
-    // version stays as the "moderate" tier.
+    // Stage 3: one elevation-based slope multiplier per wind cell, from a
+    // probe 10km along the first step's wind direction - cheap, but goes
+    // stale if wind rotates over a multi-day window (stage 4 fixes that).
     const slopeFactorByCell = new Map();
     if (strength === 3) {
       const probePoints = [];
@@ -1735,41 +1462,25 @@ async function runCountryPredictions(country, fires) {
         probePoints.push({ lat: c.lat, lng: c.lng }, { lat: probe.lat, lng: probe.lng });
         probeCellKeys.push(key);
       });
-      // Open-Meteo's elevation endpoint 400s past ~100 points in one request,
-      // and a country with many spread-out fire clusters easily has more
-      // cells than that (each cell contributes 2 points) - so this goes out
-      // in chunks of 40 pairs (80 points) rather than one big request.
+      // Open-Meteo 400s past ~100 points/request; chunk into 40 pairs (80 points).
       const ELEVATION_CHUNK_CELLS = 40;
       const elevationResults = await fetchElevationInChunks(probePoints, 2, ELEVATION_CHUNK_CELLS, signal);
       probeCellKeys.forEach((key, i) => {
         const origin = elevationResults[i * 2];
         const probe = elevationResults[i * 2 + 1];
         if (!origin || !probe) return;
-        // Percent grade over the 10km probe distance; +3% spread speed per
-        // 1% upslope grade, clamped so a cliff doesn't produce a silly
-        // multiplier - fire spreads faster uphill (preheats fuel above it)
-        // and slower downhill, which is the one piece of real fire behavior
-        // this heuristic tries to capture.
+        // Fire spreads faster uphill, slower downhill: +3% speed per 1%
+        // upslope grade, clamped so a cliff doesn't produce a silly multiplier.
         const gradePct = ((probe.elevation_m - origin.elevation_m) / 10000) * 100;
         slopeFactorByCell.set(key, Math.min(1.8, Math.max(0.5, 1 + gradePct * 0.03)));
       });
     }
 
-    // Stage 4 ("most accurate"): every signal we already pull that's
-    // actually worth using, per wind cell / per cluster so it stays cheap
-    // even though it's the most thorough tier:
-    //  - a true 2D elevation gradient (5 probes: origin + N/E/S/W at 10km)
-    //    instead of stage 3's single wind-aligned probe, so slope keeps
-    //    making sense at hour 150 even after the wind has rotated away from
-    //    its hour-0 direction, and can also nudge the travel BEARING toward
-    //    true upslope, not just scale distance
-    //  - precipitation, which realistically suppresses spread far more than
-    //    humidity alone
-    //  - temperature, combined with humidity (hot+dry spreads faster than
-    //    either factor alone implies)
-    //  - FIRMS detection confidence, so a cluster built from shaky/low-
-    //    confidence detections doesn't project as aggressively as one built
-    //    from confirmed high-confidence fire pixels
+    // Stage 4 ("most accurate"): a true 2D elevation gradient (5 probes:
+    // origin + N/E/S/W) instead of stage 3's single wind-aligned probe, so
+    // slope stays correct even after the wind rotates, and can nudge the
+    // travel bearing toward true upslope. Also folds in precipitation,
+    // temperature+humidity, and FIRMS detection confidence.
     const gradientByCell = new Map();
     if (strength >= 4) {
       const probePoints = [];
@@ -1846,10 +1557,9 @@ async function runCountryPredictions(country, fires) {
           travelBearing = blendBearing(travelBearing, upslopeBearing, blendWeight);
         }
 
-        // Stage 4: humidity + temperature (combined the way real fire-
-        // weather indices do - hot+dry spreads faster than either implies
-        // alone) and precipitation, which realistically suppresses spread
-        // far more than humidity by itself.
+        // Stage 4: humidity + temperature combined (hot+dry spreads faster
+        // than either alone) and precipitation, which suppresses spread
+        // more than humidity by itself.
         const humidityFactor = strength >= 4
           ? Math.min(1.3, Math.max(0.5, 1.4 - step.humidity_pct / 100))
           : 1;
@@ -1909,10 +1619,8 @@ predictionToggle.addEventListener('change', () => {
   }
 });
 
-// Satellite/day imagery, not night-lights - closer to how other fire
-// trackers (e.g. FireMap.live) present the globe, and it's genuinely more
-// useful here since it shows the actual terrain/vegetation a fire is
-// burning through, not just city lights.
+// Satellite/day imagery, not night-lights - shows the actual terrain a
+// fire is burning through.
 world
   .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
   .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
@@ -1928,10 +1636,8 @@ document.querySelectorAll('#continentPanel button').forEach(btn => {
   });
 });
 
-// Mobile only (see the max-width:820px media query) - Quick Look and
-// Optimize stay closed by default and open one at a time, since together
-// they're taller than most phone screens. No-op on desktop: the toggle
-// buttons are display:none there, so these listeners just never fire.
+// Mobile only - Quick Look/Optimize open one at a time. No-op on desktop
+// (toggle buttons are display:none there).
 const continentPanelEl = document.getElementById('continentPanel');
 const optimizePanelEl = document.getElementById('optimizePanel');
 document.getElementById('continentToggle').addEventListener('click', () => {
@@ -1943,36 +1649,21 @@ document.getElementById('optimizeToggle').addEventListener('click', () => {
   continentPanelEl.classList.remove('mobileOpen');
 });
 
-// Every fire worldwide is included - nothing is capped/dropped by rank. The
-// slider instead controls how coarse the server-side clustering grid is:
-// coarser grids merge more fires per marker, which is cheap to compute and
-// cheap to render at a zoomed-out view. Every fire still contributes to its
-// cluster's totals (see _cluster_fires in main.py), so this never hides a
-// region the way a top-N-by-intensity cap would. The only fires excluded
-// are ones below MIN_FRP_THRESHOLD, and only when "Show small fires" is off
-// - a flat intensity floor applied equally everywhere, not a competition.
+// Every fire worldwide is included, nothing capped by rank - the slider
+// only controls the server-side clustering grid coarseness (see
+// _cluster_fires in main.py). Only MIN_FRP_THRESHOLD ever excludes a fire.
 const DETAIL_GRID_STEPS = [3.0, 1.5, 1.0, 0.5, 0.3, 0.2, 0.1];
 const FIRE_COUNT_LABELS = ['Sparse', 'Coarse', 'Medium', 'Fine', 'Finer', 'Finest', 'Max'];
 const fireCountSlider = document.getElementById('fireCountSlider');
 const fireCountLabel = document.getElementById('fireCountLabel');
 
-// Raw detection count (what statusEl shows) is satellite pixel hits, not
-// distinct fires - a single wildfire spans many adjacent pixels, and 3
-// satellites each re-detect the same hotspot over the 2-day window. This is
-// a second, independent estimate: cluster at roughly one fire complex's
-// footprint (~5.5km, not tied to the display slider - "Sparse" mode's huge
-// cells would badly undercount) and report the resulting cluster count.
-// Runs as its own fire-and-forget fetch so it never blocks the main render.
+// Raw satellite detections overstate fire count (~3x, multiple satellites
+// re-detect the same hotspot) - this is a separate, deduplicated estimate,
+// clustered at roughly one fire complex's footprint (~5.5km, independent
+// of the display slider). Fire-and-forget so it never blocks the render.
 const FIRE_ESTIMATE_GRID = 0.05;
 let fireEstimateRequestId = 0;
 
-// The number shown is the deduplicated estimate, not the raw satellite/
-// ground row count - FIRMS' 3 satellites each re-detect the same hotspot
-// over their ~2-day window, so the raw count overstates fire activity by
-// roughly 3x on its own, before ground-sourced rows (already deduped
-// against satellite on the backend) are even added in. This clusters at
-// roughly one fire complex's footprint (~5.5km, independent of the display
-// slider - "Sparse" mode's huge cells would badly undercount).
 async function updateFireCountEstimate(paramsStr) {
   const requestId = ++fireEstimateRequestId;
   try {
@@ -2055,21 +1746,11 @@ const ADDRESS_CHECK_RADIUS_DEG = 3; // ~300-330km half-width bbox around the add
 const ADDRESS_CHECK_HOURS = 24; // fixed, independent of the country-prediction sliders
 const ADDRESS_MAX_PREDICTION_TARGETS = 15; // closest N clusters get a wind lookup, not every one
 // Fires/predicted positions beyond this are ignored entirely, regardless of
-// severity - "check within a 50km gap for various fires." Widened slightly
-// past the original 50km so it doesn't clip catastrophic's 70km watch
-// radius (the tier that most needs to be seen from farther away).
+// severity. Widened past 50km so it doesn't clip catastrophic's 70km radius.
 const ADDRESS_SEARCH_RADIUS_KM = 75;
-// Distance thresholds by severity tier. Yellow is deliberately ABSENT (not
-// just a huge radius) - a yellow fire never counts toward risk at any
-// distance, full stop; it's real but not significant enough to alert over.
-// More severe tiers get bigger radii since bigger fires spread faster and
-// give less useful warning if you only look up close. orange/red numbers
-// came directly from a specific ask; extreme's are a judgment call (not
-// given explicitly) since it's a new tier - tune freely.
-// Radius grows with severity in both directions (danger AND watch) - a
-// bigger, more intense fire is a threat from farther away, full stop. Not
-// monotonic by accident: an earlier pass had red's radius smaller than
-// orange's, which was backwards.
+// Distance thresholds by severity tier. Yellow is deliberately absent - it
+// never counts toward risk at any distance. Radius grows with severity in
+// both directions: a bigger, more intense fire is a threat from farther away.
 const RISK_THRESHOLDS_KM = {
   orange: { danger: 5, watch: 20 },
   red: { danger: 8, watch: 30 },
@@ -2078,9 +1759,8 @@ const RISK_THRESHOLDS_KM = {
 };
 const CONFIDENCE_LABELS = { h: 'high confidence', n: 'moderate confidence', l: 'low confidence' };
 
-// Same tier boundaries as the map's severityBucket/EXTREME_FRP_THRESHOLD -
-// "dangerous" is defined by the same severity a person would see as a
-// marker color on the map, not a separate scale invented just for this.
+// Same tier boundaries as the map's severityBucket - "dangerous" matches
+// the marker color a person would actually see on the map.
 function severityTierName(frp) {
   if (frp >= CATASTROPHIC_FRP_THRESHOLD) return 'catastrophic';
   if (frp >= EXTREME_FRP_THRESHOLD) return 'extreme';
@@ -2099,9 +1779,8 @@ function riskLevelFor(frp, distanceKm) {
   return null;
 }
 
-// acq_time is "HHMM" UTC (e.g. "1932" = 19:32 UTC) - how long ago a
-// detection actually happened, used so a risk result says WHY it's
-// flagging something instead of just a bare distance.
+// acq_time is "HHMM" UTC - used so a risk result says WHY it's flagging
+// something, not just a bare distance.
 function fireAgeHours(f) {
   const t = f.acq_time.padStart(4, '0');
   const detectedAt = new Date(`${f.acq_date}T${t.slice(0, 2)}:${t.slice(2, 4)}:00Z`);
@@ -2126,9 +1805,8 @@ async function checkAddressRisk() {
     world.pointOfView({ lat, lng, altitude: 0.3 }, 1200);
     updateHomeMarker(lat, lng);
 
-    // Nothing here respects the "Show small fires" toggle - that's a
-    // display-declutter choice for the main map, not something that should
-    // ever hide a real fire from a safety check.
+    // Ignores the "Show small fires" toggle - that's a display choice for
+    // the main map, not something that should hide a real fire from a safety check.
     const west = clamp(lng - ADDRESS_CHECK_RADIUS_DEG, -180, 180);
     const east = clamp(lng + ADDRESS_CHECK_RADIUS_DEG, -180, 180);
     const south = clamp(lat - ADDRESS_CHECK_RADIUS_DEG, -90, 90);
@@ -2137,20 +1815,13 @@ async function checkAddressRisk() {
     const firesJson = await firesRes.json();
     const allNearbyFires = firesJson.fires || [];
 
-    // VIIRS/MODIS "low" confidence detections are a real, known source of
-    // false positives - sun glint, cloud edges, small non-fire heat sources
-    // - it's NASA's own signal for "less certain this is actually a fire,"
-    // so a lone low-confidence blip doesn't get treated the same as a
-    // confirmed detection here. The main map still shows them (this only
-    // changes what counts as a risk trigger for this specific check).
+    // "Low" confidence detections are a known false-positive source (sun
+    // glint, cloud edges) - excluded from risk triggers here, though the
+    // main map still shows them.
     const nearbyFires = allNearbyFires.filter(f => f.confidence !== 'l' && f.confidence !== 'low');
 
-    // Tracks the single WORST candidate across every current fire and every
-    // predicted position - "check within a 50km gap for various fires, and
-    // report the most severe one, that fire will determine the info." Not
-    // "nearest fire" and "nearest predicted position" as two separate
-    // numbers - one candidate wins outright, ranked by danger > watch, tied
-    // candidates broken by whichever is closer.
+    // Tracks the single worst candidate across every fire and predicted
+    // position - ranked by danger > watch, ties broken by distance.
     const RISK_RANK = { danger: 2, watch: 1 };
     let worstRank = 0;
     let worstLevel = null;
@@ -2179,11 +1850,9 @@ async function checkAddressRisk() {
       considerCandidate(f, f.frp, haversineKm(lat, lng, f.lat, f.lng), false, null);
     });
 
-    // Predicts where the closest nearby fires will be in ADDRESS_CHECK_HOURS
-    // using a plain current-wind snapshot - the same method the country
-    // prediction's "1: Basic" strength uses, deliberately NOT the slower
-    // elevation-based tiers, so this stays fast (a few seconds) regardless
-    // of whatever the main Prediction strength slider is set to.
+    // Predicts nearby fires' positions using a plain current-wind snapshot
+    // (same as country prediction's "1: Basic"), deliberately not the
+    // slower elevation-based tiers, so this stays fast.
     if (nearbyFires.length > 0) {
       const clusters = clusterFires(nearbyFires, 0.2)
         .slice()
@@ -2215,9 +1884,7 @@ async function checkAddressRisk() {
     addressRiskBadge.className = riskClass;
     addressRiskBadge.textContent = riskLabel;
     addressLocationLine.textContent = [name, admin1, country].filter(Boolean).join(', ');
-    // Nominatim's usage policy requires attributing OpenStreetMap when its
-    // data is displayed - only shown when that fallback actually fired,
-    // since the primary (Open-Meteo) path has no such requirement.
+    // Nominatim requires attributing OpenStreetMap - only when that fallback fired.
     addressLocationLine.textContent += source === 'nominatim' ? ' (via OpenStreetMap)' : '';
 
     if (worstSource) {
