@@ -67,6 +67,8 @@
     padding: 7px 12px; text-align: left; font-size: 13px; cursor: pointer;
   }
   #continentPanel button:hover { background: #e25822; }
+  #resetZoomBtn { background: #333; border: 1px solid #555; text-align: center; }
+  #resetZoomBtn:hover { background: #e25822; border-color: #e25822; }
 
   #continentPanel hr { width: 100%; border: none; border-top: 1px solid #444; margin: 4px 0; }
   #countrySearchWrap { position: relative; display: flex; }
@@ -270,6 +272,8 @@
 </div>
 <div id="continentPanel">
   <h2>Quick Look</h2>
+  <button id="resetZoomBtn" data-lat="20" data-lng="0" data-alt="2.2">Reset Zoom</button>
+  <hr />
   <button data-lat="1" data-lng="21" data-alt="1.8">Africa</button>
   <button data-lat="-82" data-lng="0" data-alt="1.8">Antarctica</button>
   <button data-lat="34" data-lng="100" data-alt="1.8">Asia</button>
@@ -782,45 +786,34 @@ function watchForBrokenCamera() {
   const pov = world.pointOfView();
   if (!Number.isFinite(pov.lat) || !Number.isFinite(pov.lng) || !Number.isFinite(pov.altitude)) {
     world.pointOfView({ lat: 20, lng: 0, altitude: 2.2 }, 0);
+    // world.pointOfView() sets the camera's raw position, but NOT
+    // OrbitControls' own internal orbit target - if THAT was also part of
+    // what went NaN, controls.update() (called every frame, including by
+    // drag/damping) recomputes the camera position from ITS OWN internal
+    // state and immediately re-corrupts whatever this just fixed. Globe
+    // center is always (0,0,0) here, so resetting the target to the origin
+    // is always correct, not just a guess.
+    world.controls().target.set(0, 0, 0);
     lastMotionPov = null;
   }
   requestAnimationFrame(watchForBrokenCamera);
 }
 requestAnimationFrame(watchForBrokenCamera);
 
-// Self-driven camera flight, replacing calls to the built-in
-// world.pointOfView(target, ms) transition. The built-in tween was
-// observed completing instantly (or not visibly animating at all) when
-// triggered from clearCountrySearch() specifically, even after decoupling
-// it from every other state change happening in that same click handler -
-// interpolating lat/lng/altitude by hand and pushing each step through
-// pointOfView(pov, 0) (an immediate set, no tweening machinery involved at
-// all) sidesteps whatever internal quirk was short-circuiting it, and is
-// fully reliable regardless of what else runs in the same tick.
-let flyToToken = 0;
+// Hand-rolling this animation (calling pointOfView(pov, 0) every frame to
+// manually interpolate) was tried TWICE - once disabling OrbitControls for
+// the flight's duration, once pinning controls.target to the globe center
+// on every frame - and both times it broke ALL dragging afterward,
+// permanently, with the same transient NaN in the camera's raw position
+// during the first couple of frames each time. Since that never happens
+// with the built-in transition, the manual per-frame pointOfView() calls
+// are corrupting something in three-globe's own internal state beyond just
+// controls.enabled or controls.target - not practical to fully root-cause
+// without digging into its (minified) internals. Staying on the built-in
+// world.pointOfView(target, ms) for good: it may not always animate
+// visibly, but it never breaks dragging, which matters far more.
 function flyToPointOfView(target, durationMs) {
-  const myToken = ++flyToToken;
-  const start = world.pointOfView();
-  if (!Number.isFinite(start.lat) || !Number.isFinite(start.lng) || !Number.isFinite(start.altitude)) {
-    world.pointOfView(target, 0);
-    return;
-  }
-  const startTime = performance.now();
-  let dLng = target.lng - start.lng;
-  if (dLng > 180) dLng -= 360;
-  if (dLng < -180) dLng += 360;
-  function step(now) {
-    if (myToken !== flyToToken) return; // superseded by a newer flight
-    const t = Math.min(1, (now - startTime) / durationMs);
-    const eased = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2; // easeInOutQuad
-    const lat = start.lat + (target.lat - start.lat) * eased;
-    let lng = start.lng + dLng * eased;
-    lng = ((lng + 540) % 360) - 180;
-    const altitude = start.altitude + (target.altitude - start.altitude) * eased;
-    world.pointOfView({ lat, lng, altitude }, 0);
-    if (t < 1) requestAnimationFrame(step);
-  }
-  requestAnimationFrame(step);
+  world.pointOfView(target, durationMs);
 }
 
 setInterval(() => {
