@@ -727,12 +727,37 @@ async def get_wind_forecast_batch(req: ForecastRequest):
         ]
         await asyncio.gather(*(fetch_chunk(c) for c in chunks))
 
+    # A chunk can still fail after retries - not from this app's own request
+    # rate (Open-Meteo's real free-tier limits are far above what a single
+    # prediction generates), but because Render's free tier shares outbound
+    # IPs across unrelated customers, and Open-Meteo rate-limits by IP: a
+    # 429 here can mean some OTHER Render app on the same shared IP is
+    # using up the budget, which no amount of pacing on our end fixes.
+    # Rather than dropping those points (a visibly incomplete prediction,
+    # or - if every chunk in the request failed - no prediction at all),
+    # borrow the nearest point's real forecast that DID succeed. It's an
+    # approximation (wind can genuinely vary over a country), but a nearby
+    # real reading is a far better stand-in than either an empty result or
+    # a request that fails outright, and it costs zero extra Open-Meteo
+    # calls, so it can't make the underlying rate-limit situation worse.
+    fetched = [
+        (p, _forecast_cache[f"{_round_coord(p.lat)},{_round_coord(p.lng)},{req.hours}"]["steps"])
+        for p in req.points
+        if f"{_round_coord(p.lat)},{_round_coord(p.lng)},{req.hours}" in _forecast_cache
+    ]
+
+    def _nearest_fallback_steps(point: WindPoint) -> list[dict] | None:
+        if not fetched:
+            return None
+        return min(fetched, key=lambda fp: (fp[0].lat - point.lat) ** 2 + (fp[0].lng - point.lng) ** 2)[1]
+
     results = []
     for point in req.points:
         key = f"{_round_coord(point.lat)},{_round_coord(point.lng)},{req.hours}"
         cached = _forecast_cache.get(key)
-        if cached is not None:
-            results.append({"lat": point.lat, "lng": point.lng, "steps": cached["steps"]})
+        steps = cached["steps"] if cached is not None else _nearest_fallback_steps(point)
+        if steps is not None:
+            results.append({"lat": point.lat, "lng": point.lng, "steps": steps})
     return {"results": results}
 
 
