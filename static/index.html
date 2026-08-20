@@ -819,11 +819,6 @@ requestAnimationFrame(watchForBrokenCamera);
 // settle buffer, before actually starting.
 const FLIGHT_SETTLE_BUFFER_MS = 100;
 let lastFlightEndsAt = 0;
-// Tracks whether a queued flyTo is actively animating right now (as opposed
-// to just queued/about to start) - see the setInterval poll below, which
-// skips its own motion-based label hide/show while this is true because
-// flyToPointOfView already handles labels for a flight directly.
-let currentFlightEndsAt = 0;
 // Returns the total ms until this flight will have finished (queue delay +
 // its own duration), so callers with work that needs to wait for the
 // animation to actually be done (e.g. clearCountrySearch's loadFires) can
@@ -834,28 +829,6 @@ function flyToPointOfView(target, durationMs) {
   const delay = Math.max(0, lastFlightEndsAt - now) + FLIGHT_SETTLE_BUFFER_MS;
   lastFlightEndsAt = now + delay + durationMs;
   setTimeout(() => {
-    // Build the destination's label set right as the flight starts, instead
-    // of waiting for the flight to land and then for the next 200ms poll to
-    // notice the camera has stopped moving - that stack of delays is what
-    // read as "an awkward rough second where there should be names but
-    // there's not." The camera is about to spend durationMs flying TO
-    // `target` anyway, so its labels are already correct for where the
-    // camera will be looking once it arrives; showing them immediately lets
-    // them be in place (or already fading/building in) by the time the
-    // flight ends instead of popping in a beat later.
-    labelsHiddenForMotion = false;
-    lastLabelKey = null;
-    updateCountryLabels(target.altitude, target);
-    lastMotionPov = { lat: target.lat, lng: target.lng, altitude: target.altitude };
-    motionStableTicks = STABLE_TICKS_TO_SHOW_LABELS;
-    // A bit of slack past the tween's nominal duration - the built-in
-    // pointOfView tween doesn't always land in EXACTLY durationMs (a couple
-    // extra frames to settle is normal), and if the poll's motion-detection
-    // resumes before the camera has actually stopped, it reads that last
-    // sliver of motion as a fresh "moved" and briefly re-hides/re-shows the
-    // labels it just built. Harmless (self-corrects one poll tick later) but
-    // avoidable, so give the tween a little room to actually finish first.
-    currentFlightEndsAt = performance.now() + durationMs + 150;
     world.pointOfView(target, durationMs);
   }, delay);
   return delay + durationMs;
@@ -865,37 +838,27 @@ setInterval(() => {
   const pov = world.pointOfView();
   if (!Number.isFinite(pov.lat) || !Number.isFinite(pov.lng) || !Number.isFinite(pov.altitude)) return;
 
-  // A queued flight already built and showed its destination's labels the
-  // moment it started (see flyToPointOfView) and pinned lastMotionPov to
-  // that destination. Without this guard, every poll tick during the
-  // flight would see the camera's actual (still-transitioning) pov differ
-  // from that destination, read it as "moved," and immediately clear the
-  // labels this just showed - undoing the whole point of showing them early.
-  const flying = performance.now() < currentFlightEndsAt;
+  const moved = !lastMotionPov ||
+    Math.abs(pov.lat - lastMotionPov.lat) > MOTION_EPS ||
+    Math.abs(pov.lng - lastMotionPov.lng) > MOTION_EPS ||
+    Math.abs(pov.altitude - lastMotionPov.altitude) > MOTION_EPS;
+  lastMotionPov = { lat: pov.lat, lng: pov.lng, altitude: pov.altitude };
 
-  if (!flying) {
-    const moved = !lastMotionPov ||
-      Math.abs(pov.lat - lastMotionPov.lat) > MOTION_EPS ||
-      Math.abs(pov.lng - lastMotionPov.lng) > MOTION_EPS ||
-      Math.abs(pov.altitude - lastMotionPov.altitude) > MOTION_EPS;
-    lastMotionPov = { lat: pov.lat, lng: pov.lng, altitude: pov.altitude };
-
-    if (moved) {
-      motionStableTicks = 0;
-      if (!labelsHiddenForMotion) {
-        labelsHiddenForMotion = true;
-        world.labelsData([]);
-      }
-    } else if (labelsHiddenForMotion) {
-      motionStableTicks++;
-      if (motionStableTicks >= STABLE_TICKS_TO_SHOW_LABELS) {
-        labelsHiddenForMotion = false;
-        lastLabelKey = null; // force a rebuild even if the bucketed key looks unchanged
-        updateCountryLabels(pov.altitude);
-      }
-    } else {
+  if (moved) {
+    motionStableTicks = 0;
+    if (!labelsHiddenForMotion) {
+      labelsHiddenForMotion = true;
+      world.labelsData([]);
+    }
+  } else if (labelsHiddenForMotion) {
+    motionStableTicks++;
+    if (motionStableTicks >= STABLE_TICKS_TO_SHOW_LABELS) {
+      labelsHiddenForMotion = false;
+      lastLabelKey = null; // force a rebuild even if the bucketed key looks unchanged
       updateCountryLabels(pov.altitude);
     }
+  } else {
+    updateCountryLabels(pov.altitude);
   }
 
   // Re-cluster (not re-fetch) a country view's already-complete local fire
@@ -1159,12 +1122,9 @@ let lastLabelKey = null;
 // labels a beat later, instead of both fighting for the same frame.
 let initialFiresLoaded = false;
 
-function updateCountryLabels(altitude, povOverride) {
+function updateCountryLabels(altitude) {
   if (!initialFiresLoaded) return;
-  // A flight in progress can pass its destination pov directly, so the
-  // label set is computed for where the camera is HEADED rather than where
-  // it currently is mid-tween.
-  const pov = povOverride || world.pointOfView();
+  const pov = world.pointOfView();
   const key = `${Math.round(altitude * 20)}|${Math.round(pov.lat / 2)}|${Math.round(pov.lng / 2)}`;
   if (key === lastLabelKey) return;
   lastLabelKey = key;
