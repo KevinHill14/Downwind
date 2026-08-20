@@ -1414,11 +1414,18 @@ async function loadCountryFires(country) {
     lastPredictedFires = null;
     clearPredictions();
 
-    renderFireMarkers(fires, country.altitude);
-    statusEl.textContent = `${fires.length} active fire detections in ${country.name}`;
+    // If search-clear (X) fired while this fetch was in flight, inCountryView
+    // is already back to false and the world view is (re)loading - same race
+    // as the prediction-start guard above. Without this, this resumed chain
+    // would render this now-stale country's markers and overwrite "Loading
+    // fire data..." with a status line for a country the user already left.
+    if (inCountryView) {
+      renderFireMarkers(fires, country.altitude);
+      statusEl.textContent = `${fires.length} active fire detections in ${country.name}`;
+    }
     return fires;
   } catch (err) {
-    statusEl.textContent = 'Error loading fires: ' + err.message;
+    if (inCountryView) statusEl.textContent = 'Error loading fires: ' + err.message;
     return [];
   }
 }
