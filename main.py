@@ -468,25 +468,41 @@ MAX_BATCH_POINTS = 1000
 # those race out at once, which is exactly what tripped Open-Meteo's rate
 # limit (observed directly: 429s on 24-40 point chunks in production).
 # This throttles to a shared budget instead - requests queue for a slot
-# rather than all firing simultaneously.
-_OPEN_METEO_CONCURRENCY = asyncio.Semaphore(4)
+# rather than all firing simultaneously. Lowered from 4 to 3 after a large
+# country's prediction (many chunks) still tripped 429s repeatedly even
+# with the cap and retries below - a gentler outbound rate is more likely
+# to stay under Open-Meteo's limit in the first place, not just recover
+# from it faster.
+_OPEN_METEO_CONCURRENCY = asyncio.Semaphore(3)
 
 
-async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: int = 2) -> httpx.Response:
+async def _get_with_retry(url: str, params: dict, timeout: float, max_retries: int = 4) -> httpx.Response:
     """GET through the shared client and concurrency cap, retrying a 429
     (rate limited) with backoff instead of just dropping that chunk's
     points - a 429 used to silently degrade a prediction (fewer markers
-    than fires actually present) rather than being retried."""
-    async with _OPEN_METEO_CONCURRENCY:
-        for attempt in range(max_retries + 1):
+    than fires actually present) rather than being retried.
+
+    The concurrency slot is only held for the actual request attempt, not
+    the backoff sleep between attempts - holding it through the sleep (the
+    original bug here) meant a chunk waiting out a 429 kept occupying one
+    of the few slots, blocking other chunks from even making their FIRST
+    attempt, which made a rate-limited burst worse instead of better.
+    Retries/backoff were also raised (2->4 attempts, 2s->4s base, more
+    generous exponential growth) after a large country's prediction (many
+    chunks fired close together) kept exhausting the old 2-retry/short-
+    backoff budget before Open-Meteo's rate-limit window actually reset -
+    predictions already show a live elapsed-time counter, so a slower but
+    complete result reads better than a faster but partial one."""
+    for attempt in range(max_retries + 1):
+        async with _OPEN_METEO_CONCURRENCY:
             resp = await _http_client.get(url, params=params, timeout=timeout)
-            if resp.status_code != 429 or attempt == max_retries:
-                resp.raise_for_status()
-                return resp
-            retry_after = resp.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else 2.0 * (attempt + 1)
-            print(f"[open-meteo] 429 rate limited on {url}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
-            await asyncio.sleep(delay)
+        if resp.status_code != 429 or attempt == max_retries:
+            resp.raise_for_status()
+            return resp
+        retry_after = resp.headers.get("Retry-After")
+        delay = float(retry_after) if retry_after else 4.0 * (2**attempt)
+        print(f"[open-meteo] 429 rate limited on {url}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+        await asyncio.sleep(delay)
 
 
 @app.post("/api/wind/batch")
