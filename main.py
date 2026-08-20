@@ -4,7 +4,6 @@ Fire Tracker backend.
 Serves:
 - GET /                        -> frontend (static/index.html)
 - GET /api/fires                -> live fire detections from NASA FIRMS (VIIRS NRT), as GeoJSON-ish points
-- GET /api/wind                 -> live wind speed/direction for a location, used to point each fire's arrow
 - POST /api/wind/batch          -> wind for many locations in a single Open-Meteo request
 - POST /api/wind/forecast/batch -> hourly wind + humidity forecast for many locations, for the higher prediction-strength tiers
 - POST /api/elevation/batch     -> ground elevation for many locations, used for the terrain/slope prediction tier
@@ -161,7 +160,6 @@ WORLD_REFRESH_INTERVAL_SECONDS = 10 * 60  # matches FIRMS' own NRT refresh caden
 # hundred thousand rows) to hold in memory and filter/cluster in plain
 # Python, so every /api/fires request is a local list comprehension.
 _world_fires: list[dict] = []
-_world_fires_fetched_at: float = 0.0
 
 
 # ~0.15deg (~15-17km) - a VIIRS pixel this close to a ground-reported fire
@@ -198,7 +196,7 @@ def _dedupe_against_ground(satellite_fires: list[dict], ground_fires: list[dict]
 
 
 async def _refresh_world_fires() -> None:
-    global _world_fires, _world_fires_fetched_at
+    global _world_fires
     results = await asyncio.gather(*(_fetch_firms_fires(WORLD_AREA, source) for source in FIRMS_SOURCES))
     satellite_fires = [f for source_fires in results for f in source_fires]
 
@@ -211,7 +209,6 @@ async def _refresh_world_fires() -> None:
 
     satellite_fires = _dedupe_against_ground(satellite_fires, ground_fires)
     _world_fires = satellite_fires + ground_fires
-    _world_fires_fetched_at = time.time()
 
 
 async def _world_fires_refresh_loop() -> None:
@@ -278,9 +275,6 @@ async def get_fires(
     bbox: str | None = Query(
         None, description="west,south,east,north - restricts the query to a region (e.g. one country)"
     ),
-    limit: int | None = Query(
-        None, description="return only the N highest-intensity (FRP) fires, for a fast initial world view"
-    ),
     grid: float | None = Query(
         None, description="pre-aggregate fires into grid_deg x grid_deg FRP-weighted clusters before returning"
     ),
@@ -338,38 +332,11 @@ async def get_fires(
     if grid is not None:
         # Aggregated, not truncated - every fire still contributes to a cluster.
         fires = _cluster_fires(fires, grid)
-    elif limit is not None:
-        fires = sorted(fires, key=lambda f: f["frp"], reverse=True)[:limit]
 
     return {"fires": fires, "count": len(fires), "raw_count": raw_count}
 
 
 WIND_URL = "https://api.open-meteo.com/v1/forecast"
-
-
-async def _fetch_wind(lat: float, lng: float) -> tuple[float, float]:
-    """Returns (wind_speed_kmh, blowing_toward_deg). Open-Meteo reports the
-    direction wind blows FROM, so this flips it 180deg."""
-    params = {
-        "latitude": lat,
-        "longitude": lng,
-        "current": "wind_speed_10m,wind_direction_10m",
-        "wind_speed_unit": "kmh",
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(WIND_URL, params=params)
-        resp.raise_for_status()
-    current = resp.json()["current"]
-    speed = current["wind_speed_10m"]
-    blowing_toward = (current["wind_direction_10m"] + 180) % 360
-    return speed, blowing_toward
-
-
-@app.get("/api/wind")
-async def get_wind(lat: float = Query(...), lng: float = Query(...)):
-    """Live wind for a location - used to point each fire's direction arrow."""
-    speed, wind_dir = await _fetch_wind(lat, lng)
-    return {"wind_speed_kmh": speed, "wind_blowing_toward_deg": wind_dir}
 
 
 class WindPoint(BaseModel):
