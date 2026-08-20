@@ -11,11 +11,8 @@ Serves:
 - GET /api/geocode               -> place name/address -> lat/lng, for the address risk-check feature
 
 Fire data merges two sources into one in-memory dataset (see _world_fires):
-NASA FIRMS (VIIRS satellite thermal detection, worldwide) and, Canada-only
-for now, CWFIS's national ground-confirmed active fire list (see
-_fetch_canada_fires) - satellite detection alone can miss a large fire
-complex whose own smoke obscures its thermal signature, which
-ground/dispatch reporting doesn't.
+NASA FIRMS (VIIRS satellite, worldwide) and, Canada-only for now, CWFIS's
+national ground-confirmed active fire list (see _fetch_canada_fires).
 
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
@@ -37,18 +34,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
-# Querying every current VIIRS NRT satellite, not just SNPP - a single
-# satellite only passes over a given spot a couple times a day, so relying
-# on one source alone was silently missing a large share of active fires
-# (confirmed against user reports of missing Ontario fires). All three are
-# ~375m resolution and directly comparable, so results are just concatenated.
+# All 3 current VIIRS NRT satellites, not just SNPP - one alone misses a
+# large share of active fires (a satellite only passes over a spot a
+# couple times a day). All ~375m resolution and directly comparable.
 FIRMS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"]
-# Day range of 2 (not 1) - NASA's near-real-time feed occasionally has a
-# short ingestion gap where the most recent ~24h has nothing processed yet
-# even though the source itself is fine (confirmed directly against FIRMS:
-# day-range 1 returned zero rows worldwide while day-range 3 returned
-# 179k), so this adds a small buffer against that rather than the app
-# looking broken/keyless during a transient NASA-side gap.
+# Day range of 2, not 1 - NASA's NRT feed occasionally has a short
+# ingestion gap where the most recent ~24h isn't processed yet.
 FIRMS_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{area}/2"
 
 app = FastAPI(title="Fire Tracker")
@@ -72,10 +63,7 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
     header = lines[0].split(",")
     idx = {name: i for i, name in enumerate(header)}
 
-    # brightness (bright_ti4) isn't kept - nothing on the frontend uses it
-    # (only lat/lng/frp/confidence/acq_date/acq_time do), and skipping it
-    # trims both the parse work and the JSON payload for large areas where
-    # tens of thousands of rows are in play.
+    # brightness (bright_ti4) isn't kept - nothing on the frontend uses it.
     fires = []
     for line in lines[1:]:
         cols = line.split(",")
@@ -97,37 +85,23 @@ async def _fetch_firms_fires(area: str, source: str) -> list[dict]:
 
 CANADA_FIRES_URL = "https://cwfis.cfs.nrcan.gc.ca/downloads/reportedfires/activefires.csv"
 # Stages that mean "currently burning" - EX (extinguished) is the only one
-# that means it's out. BM ("being monitored") is included deliberately: a
-# real, common fire management policy (used e.g. by Ontario) is to
-# deliberately NOT suppress many remote fires that aren't threatening
-# anything, watching them instead of fighting them - still a genuine active
-# fire, just a different response posture than OC/UC/BH (out of control /
-# under control / being held). Satellite hotspot detection has no way to
-# represent that distinction; ground reporting does.
+# that isn't. BM ("being monitored") is included: many agencies (e.g.
+# Ontario) deliberately don't suppress remote fires that aren't threatening
+# anything - still a genuine active fire, just a different response posture.
 CANADA_ACTIVE_STAGES = {"OC", "UC", "BH", "BM"}
 
 
 async def _fetch_canada_fires() -> list[dict]:
-    """All of Canada's ground-confirmed active fires in one request - the
-    Canadian Wildland Fire Information System's (CWFIS, run by Natural
-    Resources Canada) national aggregation of every province/territory's own
-    agency-reported fire data (CIFFC's coordinated national standard - the
-    same field/stage conventions Ontario's own provincial service uses,
-    just already merged across all of them here). No key required. Found by
-    reverse-engineering a third-party fire tracker's network requests back
-    to its real source, then confirming this was the single national feed
-    behind it rather than 11+ separate provincial ones.
+    """All of Canada's ground-confirmed active fires in one request - CWFIS
+    (Natural Resources Canada)'s national aggregation of every province/
+    territory's agency-reported data. No key required.
 
-    This exists specifically to close a real gap satellite-only detection
-    has: a large, well-established fire complex can generate enough smoke
-    to obscure VIIRS/MODIS thermal detection over its own hottest core
-    (confirmed directly - NASA's live feed had almost nothing for a region
-    two other trackers showed a dense fire cluster in), but ground/dispatch
-    reporting still knows the fire is there and how big it actually is.
-    Canada-only for now, not deduplicated against satellite hotspots for the
-    same fire (a large complex may show both a ground marker and nearby
-    VIIRS pixels) - both are real signal, and matching them up would need
-    real spatial-correlation work this first pass doesn't attempt."""
+    Closes a real gap in satellite-only detection: a large, well-established
+    fire complex can generate enough smoke to obscure VIIRS/MODIS thermal
+    detection over its own hottest core, but ground/dispatch reporting still
+    knows it's there. Canada-only for now, not deduplicated against
+    satellite hotspots for the same fire beyond the radius-based check
+    below - both are real signal."""
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(CANADA_FIRES_URL)
         resp.raise_for_status()
@@ -147,10 +121,7 @@ async def _fetch_canada_fires() -> list[dict]:
             lat = float(cols[idx["latitude"]])
             lng = float(cols[idx["longitude"]])
             # CWFIS uses -1 as a "size not yet known" sentinel, not a real
-            # negative area - clamped to 0 here (rather than left negative)
-            # since math.log1p below requires an input > -1, and this whole
-            # fetch previously crashed silently on the very first sentinel
-            # row it hit, dropping every ground fire for the entire refresh.
+            # negative area - clamped to 0 since math.log1p below requires > -1.
             hectares = max(0.0, float(cols[idx["fire_size"]] or 0))
             status_str = cols[idx["status_date"]] or cols[idx["situation_report_date"]]
             dt = datetime.fromisoformat(status_str) if status_str else datetime.now(timezone.utc)
@@ -158,68 +129,46 @@ async def _fetch_canada_fires() -> list[dict]:
                 {
                     "lat": lat,
                     "lng": lng,
-                    # Ground-confirmed by agency dispatch, not a satellite
-                    # guess - the highest confidence tier this app has.
+                    # Ground-confirmed by agency dispatch - the highest
+                    # confidence tier this app has.
                     "confidence": "h",
-                    # No FRP is reported for ground-confirmed fires -
-                    # hectares burned is the closest severity proxy,
-                    # log-scaled so a 300,000ha complex doesn't render as
-                    # literally thousands of times more "intense" than a
-                    # 1ha one, and floored above LARGE_FIRE_MIN_FRP so
-                    # every one of these renders as its own marker, never
-                    # merged away - it's a real, verified incident, not an
-                    # ambiguous single satellite pixel.
+                    # No FRP for ground-confirmed fires - hectares burned is
+                    # the closest severity proxy, log-scaled and floored
+                    # above LARGE_FIRE_MIN_FRP so it always renders as its
+                    # own marker (a real, verified incident).
                     "frp": max(30.0, math.log1p(hectares) * 15),
                     "acq_date": dt.strftime("%Y-%m-%d"),
                     "acq_time": dt.strftime("%H%M"),
-                    # Real hectares burned, kept alongside the derived FRP
-                    # proxy above so ground fires can be filtered by their
-                    # actual size (see min_hectares on /api/fires), not just
-                    # the log-scaled severity number. Satellite detections
-                    # have no equivalent field - absence of "ha" means
-                    # "not a ground-sourced fire" everywhere this is read.
+                    # Real hectares, kept alongside the derived FRP proxy so
+                    # ground fires can be filtered by actual size (min_hectares
+                    # below). Satellite detections have no "ha" field.
                     "ha": hectares,
                 }
             )
         except (TypeError, ValueError, IndexError, KeyError):
-            # One malformed row (unexpected sentinel, missing field) should
-            # skip just that row, not silently drop every ground fire for
-            # the whole refresh - this used to be the bug: the dict/frp
-            # computation lived OUTSIDE this try block, so one bad row's
-            # exception propagated all the way out of the function.
+            # Skip just this row - a bad one shouldn't drop the whole refresh.
             continue
     return fires
 
 
 WORLD_AREA = "-180,-90,180,90"
-WORLD_REFRESH_INTERVAL_SECONDS = 10 * 60  # matches FIRMS' own NRT refresh cadence - polling faster wouldn't find anything new
+WORLD_REFRESH_INTERVAL_SECONDS = 10 * 60  # matches FIRMS' own NRT refresh cadence
 
-# The entire world's fire data, held in memory and refreshed on a timer -
-# NOT fetched per-request. This is the actual fix for "every new area you
-# look at is slow": a per-area lazy cache (what this used to be) only ever
-# speeds up a REPEAT visit to the same spot, since panning to anywhere new
-# is a cache miss that pays NASA's ~5-10s whole-world CSV generation time
-# live, every single time. A real fire tracker (FireMap.live etc.) almost
-# certainly works this way too - a background worker ingests the feed on a
-# schedule, and the site's own database (not NASA) answers every request.
-# The whole world across 3 satellites is on the order of a few hundred
-# thousand rows, small enough to hold in memory and filter/cluster in
-# plain Python fast enough to matter - every /api/fires request becomes a
-# local list comprehension, never a live upstream call.
+# The entire world's fire data, held in memory and refreshed on a timer, not
+# fetched per-request - a per-area lazy cache only speeds up repeat visits,
+# since panning anywhere new pays NASA's ~5-10s whole-world CSV generation
+# time live. The whole world across 3 satellites is small enough (a few
+# hundred thousand rows) to hold in memory and filter/cluster in plain
+# Python, so every /api/fires request is a local list comprehension.
 _world_fires: list[dict] = []
 _world_fires_fetched_at: float = 0.0
 
 
-# ~0.15deg (roughly 15-17km at Canadian latitudes) - a VIIRS satellite
-# pixel this close to a ground-reported fire is treated as a detection OF
-# that same physical fire, not a separate one. Without this, a single large
-# active fire renders as one ground marker PLUS a whole dense cluster of
-# satellite pixels scattered across its own footprint, which is real signal
-# but the same event shown many times over - a big fire visually reads as
-# "way more fires than other trackers show" even though the underlying
-# ground fire count is accurate. Doesn't need to be a precise great-circle
-# distance for this purpose - it's a visual-dedup heuristic, not a safety
-# calculation.
+# ~0.15deg (~15-17km) - a VIIRS pixel this close to a ground-reported fire
+# is treated as a detection of that same fire, not a separate one. Without
+# this, a large fire renders as one ground marker PLUS a dense cluster of
+# satellite pixels across its own footprint - real signal, but the same
+# event shown many times over. A visual-dedup heuristic, not exact.
 GROUND_DEDUP_RADIUS_DEG = 0.15
 
 
@@ -227,11 +176,9 @@ def _dedupe_against_ground(satellite_fires: list[dict], ground_fires: list[dict]
     if not ground_fires:
         return satellite_fires
 
-    # Bucket ground fires onto a grid sized to the dedup radius, so each
-    # satellite fire only needs to check its own cell + 8 neighbors instead
-    # of every ground fire - O(satellite + ground) instead of O(satellite *
-    # ground), which matters since satellite counts run into the hundreds
-    # of thousands.
+    # Bucketed onto a grid sized to the dedup radius, so each satellite fire
+    # only checks its own cell + 8 neighbors - O(satellite + ground) instead
+    # of O(satellite * ground).
     buckets: dict[tuple[int, int], list[dict]] = {}
     for gf in ground_fires:
         key = (round(gf["lat"] / GROUND_DEDUP_RADIUS_DEG), round(gf["lng"] / GROUND_DEDUP_RADIUS_DEG))
@@ -258,9 +205,8 @@ async def _refresh_world_fires() -> None:
     try:
         ground_fires = await _fetch_canada_fires()
     except Exception:
-        # Canada's ground-source feed is a supplement, not the backbone -
-        # if it's down or changes shape, satellite data (already fetched
-        # above) should still go out rather than the whole refresh failing.
+        # A supplement, not the backbone - satellite data still goes out
+        # if this is down or changes shape.
         ground_fires = []
 
     satellite_fires = _dedupe_against_ground(satellite_fires, ground_fires)
@@ -274,16 +220,15 @@ async def _world_fires_refresh_loop() -> None:
         try:
             await _refresh_world_fires()
         except Exception:
-            pass  # keep serving the last good data rather than let a transient NASA hiccup kill the loop
+            pass  # keep serving the last good data rather than let a transient hiccup kill the loop
 
 
 @app.on_event("startup")
 async def _on_startup():
     if not FIRMS_MAP_KEY:
         return
-    # Blocks server startup for one NASA-generation-time-sized wait (the
-    # only time this cost is ever paid) so the very first real request is
-    # already fast instead of racing an in-progress background fetch.
+    # Blocks startup for one fetch so the first real request is already
+    # fast instead of racing an in-progress background one.
     await _refresh_world_fires()
     asyncio.create_task(_world_fires_refresh_loop())
 
@@ -292,30 +237,19 @@ def _filter_bbox(fires: list[dict], west: float, south: float, east: float, nort
     return [f for f in fires if west <= f["lng"] <= east and south <= f["lat"] <= north]
 
 
-# Roughly the orange/red color boundary the frontend uses (see
-# intensityT/FRP_SCALE_REF in static/index.html - t=2/3 on that log scale
-# works out to ~27.4 MW, the top ~8-10% most intense fires worldwide). A
-# fire at or above this renders as its own marker, never folded into a grid
-# cell with weaker neighbors - a genuinely major fire can't get visually
-# diluted or hidden by nearby small ones just because they share a cell.
-# A lower cutoff (e.g. the orange/yellow boundary, ~4.3 MW) was tried first
-# and rejected: that's below the MEDIAN fire's intensity, so it protected
-# over 60% of all fires from clustering and took world-view load time from
-# ~500ms back up to 7+ seconds, undoing earlier clustering performance work
-# for basically no gain (most of what it "protected" wasn't actually a
-# stand-out fire). Keep this in sync with the frontend's severity thresholds
-# if FRP_SCALE_REF or the color bucket cutoffs change.
+# ~orange/red color boundary the frontend uses (see intensityT/FRP_SCALE_REF
+# in static/index.html - top ~8-10% most intense fires worldwide). A fire at
+# or above this renders as its own marker, skipping grid grouping entirely.
+# Keep in sync with the frontend's severity thresholds.
 LARGE_FIRE_MIN_FRP = 27.4
 
 
 def _cluster_fires(fires: list[dict], grid_deg: float) -> list[dict]:
     """Groups fires within grid_deg of each other into one FRP-weighted
-    centroid marker - the same aggregation static/index.html's clusterFires()
-    does client-side, but run here so a dense area's response is a few
-    hundred/thousand aggregate points instead of tens of thousands of raw
-    ones. Every fire still contributes fully to its cell's totals - nothing
-    is dropped or deprioritized, unlike a top-N cap. Fires at or above
-    LARGE_FIRE_MIN_FRP skip grouping entirely (see its docstring above)."""
+    centroid marker - same aggregation as static/index.html's clusterFires(),
+    run here so a dense area's response is a few hundred/thousand aggregate
+    points instead of tens of thousands of raw ones. Nothing is dropped,
+    unlike a top-N cap. Fires at or above LARGE_FIRE_MIN_FRP skip grouping."""
     large_fires = [f for f in fires if f["frp"] >= LARGE_FIRE_MIN_FRP]
     small_fires = [f for f in fires if f["frp"] < LARGE_FIRE_MIN_FRP]
 
@@ -384,40 +318,25 @@ async def get_fires(
             raise HTTPException(status_code=400, detail="south/north must be within [-90, 90]")
         if west >= east or south >= north:
             raise HTTPException(status_code=400, detail="bbox must satisfy west<east and south<north")
-        # A plain Python filter over the in-memory world set - no network
-        # call, so this is the same cost whether it's the first time this
-        # exact area has ever been requested or the thousandth.
         fires = _filter_bbox(fires, west, south, east, north)
 
-    # Confidence-based filtering (unconditional "l" exclusion, plus a
-    # stricter "h"-only floor when "Show small fires" is off) is TEMPORARILY
-    # REVERTED for comparison - it dropped France from 300 detections to
-    # just 1. "h" confidence turns out to be rare in VIIRS data generally
-    # (real fires mostly land at "n" nominal, not "h"), so requiring it was
-    # far too aggressive. min_confidence is accepted but currently ignored;
-    # re-enable with a better-calibrated threshold once decided.
+    # min_confidence is accepted but currently ignored - an "h"-only floor
+    # dropped France from 300 detections to 1 ("h" confidence is rare in
+    # VIIRS data generally). Re-enable with a better-calibrated threshold.
 
     if min_frp is not None:
-        # A flat intensity floor, not a top-N cap - every fire at or above
-        # min_frp still shows, regardless of how it ranks against fires
-        # elsewhere. That distinction matters: a rank-based cap can bury a
-        # real regional fire under stronger fires on the other side of the
-        # world, which is exactly the failure mode this app avoids elsewhere.
+        # A flat intensity floor, not a top-N cap - a rank-based cap can
+        # bury a real regional fire under stronger fires elsewhere.
         fires = [f for f in fires if f["frp"] >= min_frp]
 
     if min_hectares is not None:
-        # Only affects ground-sourced fires (the only ones with an "ha"
-        # field at all) - satellite detections pass through unfiltered by
-        # this. Lets "significant fires only" be compared directly against
-        # a fixed hectare threshold, same idea as min_frp but on the real
-        # burned-area number instead of the derived FRP proxy.
+        # Only affects ground-sourced fires (the only ones with "ha").
         fires = [f for f in fires if f.get("ha") is None or f["ha"] >= min_hectares]
 
     raw_count = len(fires)
 
     if grid is not None:
-        # Aggregated, not truncated - every one of raw_count fires still
-        # contributes to a cluster below, just not as individual rows.
+        # Aggregated, not truncated - every fire still contributes to a cluster.
         fires = _cluster_fires(fires, grid)
     elif limit is not None:
         fires = sorted(fires, key=lambda f: f["frp"], reverse=True)[:limit]
@@ -430,8 +349,7 @@ WIND_URL = "https://api.open-meteo.com/v1/forecast"
 
 async def _fetch_wind(lat: float, lng: float) -> tuple[float, float]:
     """Returns (wind_speed_kmh, blowing_toward_deg). Open-Meteo reports the
-    direction wind is blowing FROM, so we flip it 180deg to get the direction
-    fire would actually spread toward."""
+    direction wind blows FROM, so this flips it 180deg."""
     params = {
         "latitude": lat,
         "longitude": lng,
@@ -461,13 +379,9 @@ class WindPoint(BaseModel):
 
 @app.post("/api/wind/batch")
 async def get_wind_batch(points: list[WindPoint]):
-    """Wind for many locations at once, e.g. one per predicted fire cluster
-    or one per cell of the worldwide wind overlay grid. Open-Meteo supports
-    comma-separated lat/lng lists natively, so this is a handful of outbound
-    requests (chunked - see WIND_BATCH_CHUNK_SIZE) rather than one per point,
-    which was the main bottleneck when predicting for many markers at once.
-    Also cached per-point like the forecast/elevation endpoints, since the
-    wind overlay re-requests the same worldwide grid every time it's toggled."""
+    """Wind for many locations at once, chunked into a handful of requests
+    (Open-Meteo supports comma-separated lat/lng lists) rather than one per
+    point. Cached per-point since the same points get re-requested often."""
     if not points:
         return {"results": []}
 
@@ -479,11 +393,9 @@ async def get_wind_batch(points: list[WindPoint]):
         if cached is None or (now - cached["fetched_at"]) >= FORECAST_CACHE_TTL_SECONDS:
             uncached_points.append(p)
 
-    # Open-Meteo is a GET API - a long enough comma-separated point list hits
-    # the URL length limit (414), so uncached points go out in bounded chunks.
-    # One chunk hitting a transient error (e.g. Open-Meteo's rate limit)
-    # shouldn't blank out the whole overlay - that chunk's points are just
-    # skipped rather than failing the entire request.
+    # Open-Meteo is a GET API - a long point list hits the URL length limit
+    # (414), so points go out in bounded chunks. One chunk failing just
+    # skips its own points rather than failing the whole request.
     WIND_BATCH_CHUNK_SIZE = 200
     for i in range(0, len(uncached_points), WIND_BATCH_CHUNK_SIZE):
         chunk = uncached_points[i : i + WIND_BATCH_CHUNK_SIZE]
@@ -499,22 +411,15 @@ async def get_wind_batch(points: list[WindPoint]):
                 resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPError as e:
-            # Was silently swallowed with no trace of what actually failed -
-            # a 200 OK in the access log told us nothing about whether this
-            # outbound call to Open-Meteo even succeeded. Printed so it shows
-            # up in the host's logs (e.g. Render) when the wind overlay/
-            # predictions come back empty in production.
+            # Logged so it's visible in host logs (e.g. Render) when the
+            # wind overlay/predictions come back empty in production - a
+            # 200 OK in the access log alone says nothing about this.
             print(f"[wind/batch] Open-Meteo request failed: {type(e).__name__}: {e}")
             continue
         if isinstance(data, dict):  # Open-Meteo returns a plain object for a single point
             data = [data]
         for point, entry in zip(chunk, data):
-            # One malformed entry (Open-Meteo occasionally returns an error
-            # object for a single bad point within an otherwise-good batch)
-            # used to throw here uncaught, 500ing the whole request and
-            # losing every other point in the batch along with it. Skipping
-            # just that point keeps the rest of the batch - and the request -
-            # alive.
+            # One malformed entry shouldn't take out the rest of the batch.
             try:
                 current = entry["current"]
                 key = f"{_round_coord(point.lat)},{_round_coord(point.lng)}"
@@ -548,11 +453,8 @@ class ForecastRequest(BaseModel):
 
 
 # Per-point caches, keyed by rounded coordinates (~110m precision - plenty
-# for wind/terrain, which don't vary meaningfully at that scale). Re-running
-# a prediction (switching prediction strength, nudging the day slider, a
-# zoom-triggered re-cluster) re-requests mostly-the-same cells, and Open-
-# Meteo's free tier rate-limits fairly aggressively - caching avoids hitting
-# that on normal repeated use, not just on first load like the FIRMS cache.
+# for wind/terrain). Re-running a prediction re-requests mostly the same
+# cells, and Open-Meteo's free tier rate-limits fairly aggressively.
 _forecast_cache: dict[str, dict] = {}  # "lat,lng,hours" -> {"steps": [...], "fetched_at": float}
 _elevation_cache: dict[str, dict] = {}  # "lat,lng" -> {"elevation_m": float, "fetched_at": float}
 _current_wind_cache: dict[str, dict] = {}  # "lat,lng" -> {"wind_speed_kmh", "wind_blowing_toward_deg", "fetched_at"}
@@ -586,15 +488,10 @@ async def get_wind_forecast_batch(req: ForecastRequest):
         forecast_days = min(7, max(1, (req.hours // 24) + 2))
 
         # A single unchunked request for a country with many fire clusters
-        # (e.g. France) - up to 168 hours x 5 variables x every point in one
-        # go - was genuinely slow enough on Open-Meteo's end to blow past a
-        # flat 15s client timeout, silently returning zero predictions for
-        # that entire country while a small country (few points) finished in
-        # time. Chunking (same pattern as /api/wind/batch) keeps each
-        # individual request small/fast and lets one slow or failed chunk
-        # skip just its own points instead of taking out the whole country;
-        # chunks run concurrently so this isn't slower overall than the one
-        # big request was meant to be.
+        # (e.g. France) was slow enough on Open-Meteo's end to blow past a
+        # flat 15s timeout, silently returning zero predictions for that
+        # whole country. Chunked (same pattern as /api/wind/batch) and run
+        # concurrently, so this isn't slower overall.
         FORECAST_BATCH_CHUNK_SIZE = 40
 
         async def fetch_chunk(chunk: list[WindPoint]) -> None:
@@ -615,16 +512,10 @@ async def get_wind_forecast_batch(req: ForecastRequest):
                       f"{len(chunk)}-point chunk: {type(e).__name__}: {e}")
                 return
             if isinstance(data, dict):
-                # Open-Meteo returns a single object (not a list) both for a
-                # genuine one-point request AND, apparently, for some error
-                # conditions (e.g. exceeding its per-request location
-                # limit) - in the error case this single dict is NOT a
-                # per-point forecast, and wrapping it in a 1-element list
-                # would silently zip it against only the FIRST point while
-                # every other point in the chunk gets nothing, no
-                # exception, no log. A real forecast object always has an
-                # "hourly" key; anything else is almost certainly an error
-                # payload, worth seeing verbatim.
+                # Open-Meteo returns a single object both for a genuine
+                # one-point request and for some error conditions - a real
+                # forecast always has "hourly"; anything else needs logging,
+                # not silently zipping against only the first point.
                 if "hourly" not in data and len(chunk) != 1:
                     print(f"[wind/forecast/batch] unexpected single-object response for "
                           f"a {len(chunk)}-point chunk: {data}")
@@ -636,8 +527,6 @@ async def get_wind_forecast_batch(req: ForecastRequest):
 
             skipped = 0
             for point, entry in zip(chunk, data):
-                # A single bad point shouldn't take out the rest of the
-                # chunk - skip just this one and keep going.
                 try:
                     hourly = entry["hourly"]
                     speeds = hourly["wind_speed_10m"]
@@ -722,22 +611,17 @@ async def get_elevation_batch(points: list[WindPoint]):
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-# Nominatim's usage policy requires an identifying User-Agent and caps at
-# ~1 request/sec for this kind of light, non-bulk use - fine here since it's
-# only a fallback, not the primary path.
+# Nominatim requires an identifying User-Agent; fine here since it's only a
+# fallback, not the primary path.
 NOMINATIM_HEADERS = {"User-Agent": "hacksocial26-fire-tracker/1.0 (hackathon project)"}
 
 
 @app.get("/api/geocode")
 async def geocode(q: str = Query(..., min_length=1, description="free-text place name or address to look up")):
-    """Turns a place name/address into a lat/lng, for the 'is my home in
-    danger' address lookup. Tries Open-Meteo first (same vendor as the
-    wind/elevation endpoints - free, no key, no documented rate limit), but
-    it's a place-name gazetteer - cities, towns, landmarks - and often
-    misses a full street address ('123 Main St, Springfield'). Nominatim
-    (OpenStreetMap) covers those, so it's a second attempt when Open-Meteo
-    comes up empty, not the primary path (its stricter rate limit makes it
-    a worse default for every lookup)."""
+    """Turns a place name/address into a lat/lng. Tries Open-Meteo first
+    (free, no key, no documented rate limit), but it's a place-name
+    gazetteer that often misses a full street address - Nominatim
+    (OpenStreetMap) covers those as a second attempt."""
     params = {"name": q, "count": 1, "language": "en", "format": "json"}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -774,11 +658,9 @@ async def geocode(q: str = Query(..., min_length=1, description="free-text place
         raise HTTPException(status_code=404, detail=f"Couldn't find a location matching '{q}'")
 
     top = nominatim_results[0]
-    # display_name is Nominatim's full address string (house number through
-    # postcode, 8-10 comma-separated parts for a precise street address) -
-    # useful for disambiguation, unusable as a UI label. jsonv2's structured
-    # `address` object lets us build a short "street, city" style name
-    # instead, the same shape Open-Meteo already returns for its results.
+    # display_name is Nominatim's full address string - unusable as a UI
+    # label. jsonv2's structured `address` object builds a short
+    # "street, city" name instead, matching Open-Meteo's result shape.
     addr = top.get("address") or {}
     street = " ".join(p for p in (addr.get("house_number"), addr.get("road")) if p)
     locality = addr.get("city") or addr.get("town") or addr.get("village") or addr.get("suburb")
