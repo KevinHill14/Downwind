@@ -12,14 +12,15 @@
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 16px;
     border-radius: 8px; font-size: 13px;
   }
-  #statusSub {
-    position: absolute; top: 54px; left: 16px; z-index: 10;
-    background: rgba(20,20,20,0.85); color: #999; padding: 6px 16px;
-    border-radius: 8px; font-size: 11.5px;
-  }
-  #statusSub:empty { display: none; }
   #optimizePanel {
-    position: absolute; top: 16px; right: 16px; z-index: 10;
+    /* Fixed width, not auto-sized to content - without this, the panel's
+       width tracked whichever row's label/value text happened to be
+       longest at the moment (e.g. "1: Basic" vs "4: Max accuracy"), so
+       switching a slider value visibly resized the whole box. 260px
+       comfortably fits the longest row ("Show minor ground fires" + the
+       toggle) with room to spare. */
+    position: absolute; top: 16px; right: 16px; z-index: 10; width: 260px;
+    box-sizing: border-box;
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;
   }
@@ -54,10 +55,9 @@
   .rangeSlider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
 
   #continentPanel {
-    /* Moved up near the top status box instead of vertically centered - both
-       #status and #statusSub sit above it at top:16px/54px, so 96px clears
-       them with a bit of margin whether or not statusSub is showing text. */
-    position: absolute; left: 16px; top: 96px; z-index: 10;
+    /* Moved up near the top status box instead of vertically centered -
+       #status sits above it at top:16px, so 66px clears it with a margin. */
+    position: absolute; left: 16px; top: 66px; z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
   }
@@ -189,9 +189,7 @@
     #continentToggle { top: 16px; left: 16px; }
     #optimizeToggle { top: 16px; right: 16px; }
 
-    #status, #statusSub { font-size: 11.5px; padding: 6px 10px; }
-    #status { top: 62px; left: 16px; }
-    #statusSub { top: 94px; left: 16px; }
+    #status { font-size: 11.5px; padding: 6px 10px; top: 62px; left: 16px; }
 
     #continentPanel, #optimizePanel {
       display: none; max-height: 65vh; overflow-y: auto;
@@ -225,7 +223,6 @@
 <button id="continentToggle" class="mobilePanelToggle" title="Quick Look / search">&#127760;</button>
 <button id="optimizeToggle" class="mobilePanelToggle" title="Display options">&#9881;</button>
 <div id="status">Loading fire data...</div>
-<div id="statusSub"></div>
 <div id="optimizePanel">
   <div class="switchRow">
     <span>Prediction</span>
@@ -1222,7 +1219,6 @@ function clearCountrySearch() {
   const CLEAR_FLY_MS = 900;
   const totalFlightMs = flyToPointOfView({ lat: 20, lng: 0, altitude: 2.2 }, CLEAR_FLY_MS);
   statusEl.textContent = 'Loading fire data...';
-  statusSubEl.textContent = '';
   setTimeout(loadFires, totalFlightMs);
 }
 
@@ -1305,7 +1301,6 @@ predictionStrengthSlider.addEventListener('change', () => {
 // searched country).
 async function loadCountryFires(country) {
   inCountryView = true;
-  statusSubEl.textContent = ''; // worldwide-only estimate, not meaningful for a single country
   statusEl.textContent = `Loading fires for ${country.name}...`;
   const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
   try {
@@ -1869,18 +1864,15 @@ const fireCountLabel = document.getElementById('fireCountLabel');
 // cells would badly undercount) and report the resulting cluster count.
 // Runs as its own fire-and-forget fetch so it never blocks the main render.
 const FIRE_ESTIMATE_GRID = 0.05;
-const statusSubEl = document.getElementById('statusSub');
 let fireEstimateRequestId = 0;
 
-// The number people actually read as "how many fires are burning" needs to
-// be the deduplicated estimate, not the raw satellite/ground row count -
-// FIRMS' 3 satellites each re-detect the same hotspot over their ~2-day
-// window, so the raw count overstates fire activity by roughly 3x on its
-// own, before ground-sourced rows (already deduped against satellite on the
-// backend) are even added in. This clusters at roughly one fire complex's
-// footprint (~5.5km, independent of the display slider - "Sparse" mode's
-// huge cells would badly undercount) and becomes the PRIMARY number shown;
-// the untouched raw count moves to the secondary line as a technical detail.
+// The number shown is the deduplicated estimate, not the raw satellite/
+// ground row count - FIRMS' 3 satellites each re-detect the same hotspot
+// over their ~2-day window, so the raw count overstates fire activity by
+// roughly 3x on its own, before ground-sourced rows (already deduped
+// against satellite on the backend) are even added in. This clusters at
+// roughly one fire complex's footprint (~5.5km, independent of the display
+// slider - "Sparse" mode's huge cells would badly undercount).
 async function updateFireCountEstimate(paramsStr) {
   const requestId = ++fireEstimateRequestId;
   try {
@@ -1910,7 +1902,6 @@ async function loadFires() {
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
     renderPreClusteredMarkers(json.fires);
-    statusSubEl.textContent = `${json.raw_count.toLocaleString()} raw satellite/ground detections (re-detections not yet merged)`;
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
