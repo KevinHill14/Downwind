@@ -812,8 +812,29 @@ requestAnimationFrame(watchForBrokenCamera);
 // without digging into its (minified) internals. Staying on the built-in
 // world.pointOfView(target, ms) for good: it may not always animate
 // visibly, but it never breaks dragging, which matters far more.
+//
+// Flights are also queued rather than fired immediately: starting one
+// while a PREVIOUS one is still mid-tween (e.g. clicking search-clear right
+// after selecting a country, before that 1000ms flyTo finishes) is a
+// plausible reason the built-in tween sometimes plays cleanly and sometimes
+// doesn't - two overlapping calls fighting over the same tween state. Each
+// flight now waits for any prior one's tracked end time, plus a small fixed
+// settle buffer, before actually starting.
+const FLIGHT_SETTLE_BUFFER_MS = 100;
+let lastFlightEndsAt = 0;
+// Returns the total ms until this flight will have finished (queue delay +
+// its own duration), so callers with work that needs to wait for the
+// animation to actually be done (e.g. clearCountrySearch's loadFires) can
+// schedule off the real completion time instead of just the flight's own
+// nominal duration.
 function flyToPointOfView(target, durationMs) {
-  world.pointOfView(target, durationMs);
+  const now = performance.now();
+  const delay = Math.max(0, lastFlightEndsAt - now) + FLIGHT_SETTLE_BUFFER_MS;
+  lastFlightEndsAt = now + delay + durationMs;
+  setTimeout(() => {
+    world.pointOfView(target, durationMs);
+  }, delay);
+  return delay + durationMs;
 }
 
 setInterval(() => {
@@ -1199,10 +1220,10 @@ function clearCountrySearch() {
   // has elapsed instead of firing immediately alongside it, so the heavy
   // data rebuild doesn't compete with the animation for the same frames.
   const CLEAR_FLY_MS = 900;
-  flyToPointOfView({ lat: 20, lng: 0, altitude: 2.2 }, CLEAR_FLY_MS);
+  const totalFlightMs = flyToPointOfView({ lat: 20, lng: 0, altitude: 2.2 }, CLEAR_FLY_MS);
   statusEl.textContent = 'Loading fire data...';
   statusSubEl.textContent = '';
-  setTimeout(loadFires, CLEAR_FLY_MS);
+  setTimeout(loadFires, totalFlightMs);
 }
 
 countrySearch.addEventListener('input', () => {
