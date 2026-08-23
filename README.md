@@ -45,8 +45,17 @@ Select a country (via search) to see predicted spread for its active fires, at 4
 
 Prediction window is adjustable 1–7 days. This is explicitly a demo-grade approximation, not a physical fire-behavior simulation — good for visualizing *a* plausible spread direction, not for real operational decisions.
 
+**Monte Carlo mode** (toggle, off by default — only available while Prediction is on): a single projected line quietly implies the forecast wind is exact. With this on, the same spread math is re-run 18 times per fire with the wind perturbed within its realistic forecast error, and the resulting fan is drawn underneath the main projection — so you can see *how confident the projection actually is*. A tight fan means the wind is consistent and the projection is trustworthy; a wide one means it genuinely could go several ways. Costs no extra API calls (it re-uses the wind data already fetched), and to keep rendering fast only the most intense markers get a fan.
+
+**Playback** — a "See animation" button walks every fire from where it is now to its projected position over the prediction window, so the spread reads as motion rather than a static line. The button doubles as the clock (`Stop (+28h)`). Only the markers move; the projected paths stay drawn underneath as the route, which keeps it to a single buffer update per frame instead of rebuilding hundreds of lines.
+
 ### "Am I in danger?" address check
 Type an address, and the app geocodes it, looks at nearby fires (including their predicted spread), and returns a **Safe / Watch / Danger** badge with the nearest real threat's distance, confidence, and either how long ago it was detected or its predicted time of arrival.
+
+With **Monte Carlo** on, it also reports how often a fire actually reaches you across sampled wind scenarios — *"100% of 18 wind scenarios bring a fire within watch range, 6% within danger range"* — instead of a single yes/no. If a substantial share of scenarios come out worse than the single best-guess wind, the rating is raised to match and says so: a 1-in-3 chance of being in danger shouldn't display as a flat "SAFE" just because the most likely wind happens to miss.
+
+### Click a fire for details
+Click any marker for its exact position, detection count, total and peak FRP, area burned (ground-sourced fires), confidence, and how recently it was detected — or, for a projected marker, its lead time and the wind driving it. Implemented by raycasting the existing batched marker cloud **on click only**; hover would mean hit-testing on every mouse move, which is what made an earlier attempt at this laggy.
 
 ### Country search & quick navigation
 Type-ahead country search flies the camera to the country and loads only fires inside its actual border (point-in-polygon filtered, not just a bounding box). Continent quick-look buttons jump the camera to a preset view.
@@ -159,6 +168,13 @@ These aren't environment variables — they're constants in the code, listed her
 | `COUNTRY_LABEL_CAP` | 45 | Max country/water-body name labels rendered at once. |
 | `LABEL_VISIBILITY_FACTOR` | 6 | A label appears once camera altitude is within 6× that feature's "natural framing" altitude. |
 | `WIND_GRID_DEG` | 0.3° (~30km) | Nearby fire clusters within this distance share one wind lookup instead of querying per-fire. |
+| `MONTE_CARLO_SAMPLES` | 18 | Wind scenarios simulated per fire in Monte Carlo mode. |
+| `MONTE_CARLO_PATH_BUDGET` | 700 | Max sample paths rendered at once; caps how many markers get a fan (budget ÷ samples). |
+| `MC_BEARING_SD_DEG` | 22° | Assumed scenario-level wind direction uncertainty. |
+| `MC_SPEED_SD_FRAC` | 0.28 | Assumed wind speed uncertainty (±~28%). |
+| `MC_RISK_ESCALATION_FRACTION` | 0.30 | Share of scenarios that must reach a risk level before the address check raises its rating to match. |
+| `PREDICTION_ANIMATION_DURATION_MS` | 7000 | How long the "See animation" playback takes to cover the whole prediction window. |
+| `FIRE_CLICK_TOLERANCE_PX` | 12 | Click tolerance for selecting a fire marker, in screen pixels (converted to world units per zoom level). |
 
 ---
 
@@ -223,6 +239,5 @@ The broader lesson from this whole chain: the first few fixes were all real impr
 
 - Prediction is a **demo-grade approximation** of fire spread, not a physical simulation — good for visualizing plausible direction/reach, not for real operational/safety decisions.
 - Ground-confirmed (agency-reported) fire data currently covers Canada only.
-- Fire/cluster/prediction details currently only show via hover tooltip — a proper click-to-open info panel is a natural next step.
 - Ocean name labels reuse the country label system but aren't fully built out.
 - A compass showing camera orientation relative to the rest of the world, and a "jump to my own location" street-view-style button, were discussed but not built.

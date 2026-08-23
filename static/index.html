@@ -97,12 +97,38 @@
     border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
   }
   #predictionPanel button:hover { background: #555; }
+  #predictionPanel button + button { margin-left: 6px; }
+  #playPrediction { display: none; }
+  #playPrediction.available { display: inline-block; }
+  #playPrediction.playing { background: #7a3410; }
 
   #addressPanel {
     position: absolute; bottom: 16px; right: 16px; z-index: 10;
     background: rgba(20,20,20,0.9); color: #eee; padding: 12px 16px;
     border-radius: 8px; font-size: 13px; max-width: 300px;
   }
+  /* Sits in the free centre-bottom gap between the prediction (bottom-left)
+     and address (bottom-right) panels, above both so it's never clipped. */
+  #firePanel {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 12; background: rgba(20,20,20,0.94); color: #eee;
+    padding: 12px 16px; border-radius: 8px; font-size: 13px;
+    width: 280px; box-sizing: border-box; display: none;
+    border: 1px solid #444;
+  }
+  #firePanel.open { display: block; }
+  #firePanelHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  #firePanelSwatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  #firePanelTitle { font-weight: 600; flex: 1; }
+  #firePanelClose {
+    background: none; border: none; color: #888; cursor: pointer;
+    font-size: 18px; line-height: 1; padding: 0 2px;
+  }
+  #firePanelClose:hover { color: #fff; }
+  #firePanel dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; }
+  #firePanel dt { color: #999; }
+  #firePanel dd { margin: 0; text-align: right; }
+  #firePanelNote { margin: 8px 0 0; color: #999; font-size: 12px; line-height: 1.4; }
   #addressPanel h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
   #addressInputWrap { position: relative; display: flex; }
   #addressInput {
@@ -244,6 +270,16 @@
       <span class="slider"></span>
     </label>
   </div>
+  <!-- Only meaningful when Prediction is on - it's a modifier on how the
+       prediction is computed, not an independent feature - so this row is
+       hidden entirely while Prediction is off (see syncMonteCarloAvailability). -->
+  <div class="switchRow" id="monteCarloRow">
+    <span>Monte Carlo</span>
+    <label class="switch">
+      <input type="checkbox" id="monteCarloToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
   <div class="switchRow">
     <span>Show small fires</span>
     <label class="switch">
@@ -303,6 +339,7 @@
 <div id="predictionPanel">
   <h3>Fire spread predictions</h3>
   <div id="predictionInfo"></div>
+  <button id="playPrediction">&#9654; See animation</button>
   <button id="clearPredictions">Clear</button>
 </div>
 <div id="addressPanel">
@@ -316,7 +353,18 @@
     <span id="addressRiskBadge"></span>
     <p id="addressLocationLine"></p>
     <p id="addressProximityLine"></p>
+    <!-- Only populated when Monte Carlo is on; hidden otherwise. -->
+    <p id="addressProbabilityLine"></p>
   </div>
+</div>
+<div id="firePanel">
+  <div id="firePanelHeader">
+    <span id="firePanelSwatch"></span>
+    <span id="firePanelTitle"></span>
+    <button id="firePanelClose" title="Close">&times;</button>
+  </div>
+  <dl id="firePanelDetails"></dl>
+  <p id="firePanelNote"></p>
 </div>
 <div id="disclaimerBar">
   Fire data from satellite (NASA FIRMS) and ground (Natural Resources Canada CWFIS) sources - detections can be delayed, missed, or misattributed, and predicted spread is a rough estimate, not a guarantee. Do not rely on this tool for evacuation or safety decisions - always follow official emergency alerts.
@@ -408,8 +456,15 @@ const fireSpritesMaterial = new THREE.PointsMaterial({
 });
 const fireSpritesObject = new THREE.Points(fireSpritesGeometry, fireSpritesMaterial);
 
+// The markers currently in the sprite buffer, in buffer order - so a
+// raycast hit (which reports a point INDEX) can be mapped back to the
+// marker it represents. See the click handler in the fire detail panel
+// section below.
+let renderedFireMarkers = [];
+
 // Rebuilds the sprite cloud's position/color buffers from the current markers.
 function updateFireSprites(markers) {
+  renderedFireMarkers = markers;
   const positions = new Float32Array(markers.length * 3);
   const colors = new Float32Array(markers.length * 3);
   markers.forEach((d, i) => {
@@ -476,8 +531,10 @@ const world = Globe()
   .arcStartLng(d => d.startLng)
   .arcEndLat(d => d.endLat)
   .arcEndLng(d => d.endLng)
-  .arcColor(() => '#ffffff')
-  .arcStroke(0.075)
+  // Per-datum, defaulting to the previous fixed white/0.075 - lets Monte
+  // Carlo sample arcs render faint and thin alongside the solid main one.
+  .arcColor(d => d.color || '#ffffff')
+  .arcStroke(d => d.stroke ?? 0.075)
   .arcAltitude(0.008) // fixed, not auto-scaled - auto flattened arcs onto the surface (z-fighting)
   .arcsTransitionDuration(0)
   // Multi-point trajectory for prediction strength 2+ (hourly-stepped,
@@ -487,8 +544,10 @@ const world = Globe()
   .pathPointLat(p => p[0])
   .pathPointLng(p => p[1])
   .pathPointAlt(0.008)
-  .pathColor(() => '#ffffff')
-  .pathStroke(1) // screen-space pixels, not the same unit as arcStroke
+  // Per-datum, defaulting to the previous fixed white/1 - same reason as
+  // arcColor/arcStroke above.
+  .pathColor(d => d.color || '#ffffff')
+  .pathStroke(d => d.stroke ?? 1) // screen-space pixels, not the same unit as arcStroke
   .pathTransitionDuration(0)
   // Country name labels - capped and only rebuilt when the visible set
   // changes (see updateCountryLabels).
@@ -1094,10 +1153,20 @@ countrySearchClear.addEventListener('click', clearCountrySearch);
 
 // --- Fire spread predictions (gated by the Prediction toggle) ---
 const predictionToggle = document.getElementById('predictionToggle');
+const monteCarloToggle = document.getElementById('monteCarloToggle');
+const monteCarloRow = document.getElementById('monteCarloRow');
 const predictionPanel = document.getElementById('predictionPanel');
 const predictionInfo = document.getElementById('predictionInfo');
 const clearPredictionsBtn = document.getElementById('clearPredictions');
 const addressPanel = document.getElementById('addressPanel');
+
+// Monte Carlo only modifies how a prediction is computed, so it's offered
+// only while Prediction is on - with Prediction off there's nothing for it
+// to modify, and leaving a live-looking switch there would imply otherwise.
+function syncMonteCarloAvailability() {
+  monteCarloRow.style.display = predictionToggle.checked ? '' : 'none';
+}
+syncMonteCarloAvailability();
 
 // Mobile: a running prediction replaces "Am I in danger?" in the shared
 // bottom slot (only room for one), cross-fading via .hiddenMobile instead
@@ -1230,6 +1299,50 @@ function spreadDistanceKm(windSpeedKmh, frp, hours) {
   return (0.15 * windSpeedKmh + 0.3) * intensityFactor * (hours / 6);
 }
 
+// --- Monte Carlo uncertainty sampling ------------------------------------
+// The single projected path is one deterministic answer to a genuinely
+// uncertain question - it takes the forecast wind as exact truth. Monte
+// Carlo re-runs the SAME spread math many times with the wind perturbed
+// within its realistic error, and draws the resulting fan, so the output
+// shows how confident the projection actually is instead of implying a
+// precision it doesn't have. Costs no extra API calls - it re-uses the
+// wind/forecast data already fetched for the deterministic run.
+const MONTE_CARLO_SAMPLES = 18;
+// Sample paths are the expensive part to render (each is its own line), so
+// only the most intense fires get a fan - at 18 samples this is the top ~38
+// markers. The deterministic path is still drawn for every marker.
+const MONTE_CARLO_PATH_BUDGET = 700;
+// Forecast wind error grows with lead time; these are whole-window
+// approximations, not calibrated per-hour figures.
+const MC_BEARING_SD_DEG = 22;    // scenario-level directional uncertainty
+const MC_SPEED_SD_FRAC = 0.28;   // +/- ~28% on wind speed
+const MC_STEP_BEARING_SD_DEG = 7; // extra per-step wobble within a scenario
+const MC_SAMPLE_COLOR = 'rgba(255,168,64,0.30)';
+const MC_SAMPLE_PATH_STROKE = 0.5;
+const MC_SAMPLE_ARC_STROKE = 0.03;
+
+// Standard normal via Box-Muller. Gaussian rather than uniform because
+// forecast error really is bell-shaped - most samples should land near the
+// forecast, with occasional larger misses, which is what makes the fan's
+// density meaningful rather than just a flat spray.
+function gaussianRandom() {
+  let u = 0;
+  let v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function monteCarloEnabled() {
+  // Strictly a modifier on prediction - never runs on its own.
+  return predictionToggle.checked && monteCarloToggle.checked;
+}
+
+// How many of the (FRP-sorted) targets get a sample fan, given the render budget.
+function monteCarloTargetLimit() {
+  return Math.max(1, Math.floor(MONTE_CARLO_PATH_BUDGET / MONTE_CARLO_SAMPLES));
+}
+
 // Circular-mean blend from bearing a toward bearing b by fraction w (0 =
 // pure a, 1 = pure b) - a plain weighted average breaks down near the
 // 0/360 wraparound, so this blends unit vectors instead.
@@ -1269,6 +1382,10 @@ function clusterConfidenceFactor(cluster) {
 function clearPredictions() {
   predictionRunId++; // invalidate any runCountryPredictions() still in flight
   predictionAbortController?.abort(); // and actually stop its in-flight fetches, not just ignore their result
+  // Without restoring - the markers it was animating are about to be cleared.
+  stopPredictionAnimation({ restore: false });
+  lastPredictedMarkers = [];
+  playPredictionBtn.classList.remove('available');
   predictionArcs = [];
   updateArcsLayer();
   predictionPaths = [];
@@ -1311,7 +1428,7 @@ async function fetchElevationInChunks(points, perGroup, groupsPerChunk, signal) 
   return chunkResults.flat();
 }
 
-function makePredictedMarker(c, dest, hours, windSpeedKmh) {
+function makePredictedMarker(c, dest, hours, windSpeedKmh, pathPoints) {
   return {
     lat: dest.lat,
     lng: dest.lng,
@@ -1322,6 +1439,11 @@ function makePredictedMarker(c, dest, hours, windSpeedKmh) {
     predicted: true,
     predictionHours: hours,
     windSpeedKmh,
+    // The full [lat,lng] trajectory from origin to this predicted position,
+    // kept so the playback animation can walk the marker along it. Steps are
+    // evenly spaced in TIME (one per forecast step), so interpolating by
+    // index fraction is also interpolating by time.
+    pathPoints,
   };
 }
 
@@ -1399,6 +1521,13 @@ async function runCountryPredictions(country, fires) {
   const predictedMarkers = [];
   const newArcs = [];
   const newPaths = [];
+  // Monte Carlo sample geometry, kept separate so it can be drawn beneath
+  // the deterministic result rather than over it.
+  const mcArcs = [];
+  const mcPaths = [];
+  const mcOn = monteCarloEnabled();
+  const mcLimit = monteCarloTargetLimit();
+  let mcSampledTargets = 0;
 
   if (strength === 1) {
     // Stage 1: one current-conditions wind snapshot, straight projection.
@@ -1416,19 +1545,37 @@ async function runCountryPredictions(country, fires) {
       }
     }
 
-    targets.forEach(c => {
+    targets.forEach((c, targetIndex) => {
       const wind = windByCell.get(cellOf(c));
       if (!wind) return;
       const distanceKm = spreadDistanceKm(wind.wind_speed_kmh, c.totalFrp, hours);
       const dest = destinationPoint(c.lat, c.lng, wind.wind_blowing_toward_deg, distanceKm);
 
       c.faded = true; // dim the fire's current position in place
-      predictedMarkers.push(makePredictedMarker(c, dest, hours, wind.wind_speed_kmh));
+      predictedMarkers.push(makePredictedMarker(c, dest, hours, wind.wind_speed_kmh,
+        [[c.lat, c.lng], [dest.lat, dest.lng]]));
       newArcs.push({ startLat: c.lat, startLng: c.lng, endLat: dest.lat, endLng: dest.lng, color: '#ffffff', animated: false });
+
+      // Same projection, re-run with the wind perturbed inside its plausible
+      // error - the spread of endpoints IS the uncertainty estimate.
+      if (mcOn && targetIndex < mcLimit) {
+        mcSampledTargets++;
+        for (let s = 0; s < MONTE_CARLO_SAMPLES; s++) {
+          const bearing = wind.wind_blowing_toward_deg + gaussianRandom() * MC_BEARING_SD_DEG;
+          const speed = Math.max(0, wind.wind_speed_kmh * (1 + gaussianRandom() * MC_SPEED_SD_FRAC));
+          const sampleDest = destinationPoint(c.lat, c.lng, bearing, spreadDistanceKm(speed, c.totalFrp, hours));
+          mcArcs.push({
+            startLat: c.lat, startLng: c.lng,
+            endLat: sampleDest.lat, endLng: sampleDest.lng,
+            color: MC_SAMPLE_COLOR, stroke: MC_SAMPLE_ARC_STROKE, animated: false,
+          });
+        }
+      }
     });
 
     if (runId !== predictionRunId) return; // superseded - don't resurrect cleared arcs
-    predictionArcs = newArcs;
+    // Samples first so the solid deterministic arc draws on top of its fan.
+    predictionArcs = [...mcArcs, ...newArcs];
     updateArcsLayer();
   } else {
     // Stage 2+: hourly wind forecast instead of one static snapshot, stepped
@@ -1518,7 +1665,7 @@ async function runCountryPredictions(country, fires) {
       });
     }
 
-    targets.forEach(c => {
+    targets.forEach((c, targetIndex) => {
       const steps = forecastByCell.get(cellOf(c));
       if (!steps || steps.length === 0) return;
       const cellKey = cellOf(c);
@@ -1526,76 +1673,114 @@ async function runCountryPredictions(country, fires) {
       const gradient = strength >= 4 ? gradientByCell.get(cellKey) : null;
       const confidenceFactor = strength >= 4 ? clusterConfidenceFactor(c) : 1;
 
-      let lat = c.lat;
-      let lng = c.lng;
-      let lastWindSpeed = steps[0].wind_speed_kmh;
-      const points = [[lat, lng]];
+      // Walks the forecast steps applying this stage's terrain/weather
+      // factors. `jitter` is null for the real projection; a Monte Carlo
+      // sample passes one in to perturb the wind it walks through, so both
+      // run through identical physics and only the inputs differ.
+      function walkTrajectory(jitter) {
+        let lat = c.lat;
+        let lng = c.lng;
+        let lastWindSpeed = steps[0].wind_speed_kmh;
+        const points = [[lat, lng]];
 
-      steps.forEach((step, i) => {
-        const nextHour = i + 1 < steps.length ? steps[i + 1].hours_from_now : hours;
-        const stepHours = Math.min(nextHour, hours) - step.hours_from_now;
-        if (stepHours <= 0) return;
+        steps.forEach((step, i) => {
+          const nextHour = i + 1 < steps.length ? steps[i + 1].hours_from_now : hours;
+          const stepHours = Math.min(nextHour, hours) - step.hours_from_now;
+          if (stepHours <= 0) return;
 
-        let travelBearing = step.wind_blowing_toward_deg;
-        let slopeFactor = flatSlopeFactor;
+          let stepWindSpeed = step.wind_speed_kmh;
+          let travelBearing = step.wind_blowing_toward_deg;
+          if (jitter) {
+            // Scenario-level bias stays constant across the whole path, with
+            // a smaller per-step wobble on top. Purely per-step randomness
+            // would random-walk back toward the deterministic answer and
+            // understate the real uncertainty.
+            travelBearing += jitter.bearingBias + gaussianRandom() * MC_STEP_BEARING_SD_DEG;
+            stepWindSpeed = Math.max(0, stepWindSpeed * jitter.speedScale);
+          }
+          let slopeFactor = flatSlopeFactor;
 
-        if (gradient) {
-          // Project the gradient onto THIS step's actual wind bearing
-          // (unlike stage 3's one-shot probe, this stays correct as wind
-          // rotates hour to hour) to get % grade in the direction of travel.
-          const windRad = (travelBearing * Math.PI) / 180;
-          const gradAlongWind = gradient.gradNorth * Math.cos(windRad) + gradient.gradEast * Math.sin(windRad);
-          const gradePct = gradAlongWind / 10; // m rise per km -> % grade
-          slopeFactor = Math.min(1.8, Math.max(0.5, 1 + gradePct * 0.03));
+          if (gradient) {
+            // Project the gradient onto THIS step's actual wind bearing
+            // (unlike stage 3's one-shot probe, this stays correct as wind
+            // rotates hour to hour) to get % grade in the direction of travel.
+            const windRad = (travelBearing * Math.PI) / 180;
+            const gradAlongWind = gradient.gradNorth * Math.cos(windRad) + gradient.gradEast * Math.sin(windRad);
+            const gradePct = gradAlongWind / 10; // m rise per km -> % grade
+            slopeFactor = Math.min(1.8, Math.max(0.5, 1 + gradePct * 0.03));
 
-          // Bend the travel direction slightly toward true upslope - capped
-          // so wind still dominates overall, this is a nudge not a
-          // replacement for wind-driven spread.
-          const steepness = Math.hypot(gradient.gradNorth, gradient.gradEast); // m per km
-          const upslopeBearing = ((Math.atan2(gradient.gradEast, gradient.gradNorth) * 180) / Math.PI + 360) % 360;
-          const blendWeight = Math.min(0.35, steepness * 0.004);
-          travelBearing = blendBearing(travelBearing, upslopeBearing, blendWeight);
+            // Bend the travel direction slightly toward true upslope - capped
+            // so wind still dominates overall, this is a nudge not a
+            // replacement for wind-driven spread.
+            const steepness = Math.hypot(gradient.gradNorth, gradient.gradEast); // m per km
+            const upslopeBearing = ((Math.atan2(gradient.gradEast, gradient.gradNorth) * 180) / Math.PI + 360) % 360;
+            const blendWeight = Math.min(0.35, steepness * 0.004);
+            travelBearing = blendBearing(travelBearing, upslopeBearing, blendWeight);
+          }
+
+          // Stage 4: humidity + temperature combined (hot+dry spreads faster
+          // than either alone) and precipitation, which suppresses spread
+          // more than humidity by itself.
+          const humidityFactor = strength >= 4
+            ? Math.min(1.3, Math.max(0.5, 1.4 - step.humidity_pct / 100))
+            : 1;
+          const temperatureFactor = strength >= 4
+            ? Math.min(1.3, Math.max(0.7, 0.85 + (step.temperature_c - 20) * 0.015))
+            : 1;
+          const precipFactor = strength >= 4
+            ? Math.min(1, Math.max(0.15, 1 - step.precipitation_mm * 0.5))
+            : 1;
+
+          const distanceKm = spreadDistanceKm(stepWindSpeed, c.totalFrp, stepHours)
+            * slopeFactor * humidityFactor * temperatureFactor * precipFactor * confidenceFactor;
+          const dest = destinationPoint(lat, lng, travelBearing, distanceKm);
+          lat = dest.lat;
+          lng = dest.lng;
+          lastWindSpeed = stepWindSpeed;
+          points.push([lat, lng]);
+        });
+
+        return { lat, lng, lastWindSpeed, points };
+      }
+
+      const { lat, lng, lastWindSpeed, points } = walkTrajectory(null);
+
+      if (mcOn && targetIndex < mcLimit) {
+        mcSampledTargets++;
+        for (let s = 0; s < MONTE_CARLO_SAMPLES; s++) {
+          const sample = walkTrajectory({
+            bearingBias: gaussianRandom() * MC_BEARING_SD_DEG,
+            speedScale: Math.max(0.1, 1 + gaussianRandom() * MC_SPEED_SD_FRAC),
+          });
+          mcPaths.push({ points: sample.points, color: MC_SAMPLE_COLOR, stroke: MC_SAMPLE_PATH_STROKE });
         }
-
-        // Stage 4: humidity + temperature combined (hot+dry spreads faster
-        // than either alone) and precipitation, which suppresses spread
-        // more than humidity by itself.
-        const humidityFactor = strength >= 4
-          ? Math.min(1.3, Math.max(0.5, 1.4 - step.humidity_pct / 100))
-          : 1;
-        const temperatureFactor = strength >= 4
-          ? Math.min(1.3, Math.max(0.7, 0.85 + (step.temperature_c - 20) * 0.015))
-          : 1;
-        const precipFactor = strength >= 4
-          ? Math.min(1, Math.max(0.15, 1 - step.precipitation_mm * 0.5))
-          : 1;
-
-        const distanceKm = spreadDistanceKm(step.wind_speed_kmh, c.totalFrp, stepHours)
-          * slopeFactor * humidityFactor * temperatureFactor * precipFactor * confidenceFactor;
-        const dest = destinationPoint(lat, lng, travelBearing, distanceKm);
-        lat = dest.lat;
-        lng = dest.lng;
-        lastWindSpeed = step.wind_speed_kmh;
-        points.push([lat, lng]);
-      });
+      }
 
       c.faded = true; // dim the fire's current position in place
-      predictedMarkers.push(makePredictedMarker(c, { lat, lng }, hours, lastWindSpeed));
+      predictedMarkers.push(makePredictedMarker(c, { lat, lng }, hours, lastWindSpeed, points));
       newPaths.push({ points });
     });
 
     if (runId !== predictionRunId) return; // superseded - don't resurrect cleared arcs/paths
-    world.pathsData(newPaths);
-    predictionPaths = newPaths;
+    // Samples first so the solid deterministic path draws on top of its fan.
+    predictionPaths = [...mcPaths, ...newPaths];
+    world.pathsData(predictionPaths);
   }
 
   if (runId !== predictionRunId) return; // superseded - don't clobber current state with stale results
   updateFireSprites([...lastClusters, ...predictedMarkers]);
+  // Playback is only offered once there's actually a projection to play.
+  lastPredictedMarkers = predictedMarkers;
+  playPredictionBtn.classList.toggle('available', predictedMarkers.length > 0);
 
   const projectedCount = strength === 1 ? newArcs.length : newPaths.length;
+  const mcNote = mcOn && mcSampledTargets > 0
+    ? `<p>Monte Carlo: ${MONTE_CARLO_SAMPLES} wind scenarios each for the ${mcSampledTargets} most intense marker(s) - the fan shows how uncertain the projection is</p>`
+    : '';
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
     <p>Projected ${hours}hr position for ${projectedCount} of ${targets.length} marker(s)</p>
+    ${mcNote}
   `;
   } catch (err) {
     // AbortError means this run was deliberately cancelled (superseded by a
@@ -1609,13 +1794,109 @@ async function runCountryPredictions(country, fires) {
   }
 }
 
+// --- Prediction playback animation ---------------------------------------
+// Walks every predicted marker along its own trajectory from where the fire
+// is now to where it's projected to end up, so the spread reads as motion
+// instead of a static line.
+//
+// Only the MARKERS move; the projected paths stay drawn underneath as the
+// route. That's deliberate: markers are one batched buffer, so moving all
+// of them is a single Float32Array rewrite per frame (cheap, already the
+// normal update path), whereas re-truncating hundreds of path lines every
+// frame would rebuild that much line geometry 60x a second.
+const PREDICTION_ANIMATION_DURATION_MS = 7000;
+const playPredictionBtn = document.getElementById('playPrediction');
+let lastPredictedMarkers = [];
+let predictionAnimationRaf = null;
+
+function predictionAnimationActive() { return predictionAnimationRaf !== null; }
+
+function setPlayButtonState(playing) {
+  playPredictionBtn.classList.toggle('playing', playing);
+  playPredictionBtn.innerHTML = playing ? '&#9632; Stop' : '&#9654; See animation';
+}
+
+// Position along a trajectory at time fraction f (0 = now, 1 = full window).
+function pointAlongPath(pathPoints, f) {
+  if (!pathPoints || pathPoints.length === 0) return null;
+  if (pathPoints.length === 1) return { lat: pathPoints[0][0], lng: pathPoints[0][1] };
+  const idx = f * (pathPoints.length - 1);
+  // Clamped at both ends: requestAnimationFrame's timestamp is when the
+  // frame STARTED, which can predate the performance.now() captured when
+  // playback began, so the first frame can legitimately arrive with a
+  // slightly negative elapsed time and index backwards off the array.
+  const i = Math.max(0, Math.min(pathPoints.length - 2, Math.floor(idx)));
+  const frac = idx - i;
+  const [aLat, aLng] = pathPoints[i];
+  const [bLat, bLng] = pathPoints[i + 1];
+  // Longitude lerped the short way round so a path crossing the antimeridian
+  // doesn't whip the marker the long way across the globe mid-animation.
+  let dLng = bLng - aLng;
+  if (dLng > 180) dLng -= 360;
+  if (dLng < -180) dLng += 360;
+  return { lat: aLat + (bLat - aLat) * frac, lng: aLng + dLng * frac };
+}
+
+function stopPredictionAnimation({ restore = true } = {}) {
+  if (predictionAnimationRaf !== null) {
+    cancelAnimationFrame(predictionAnimationRaf);
+    predictionAnimationRaf = null;
+  }
+  setPlayButtonState(false);
+  if (restore && lastPredictedMarkers.length > 0) {
+    updateFireSprites([...lastClusters, ...lastPredictedMarkers]);
+  }
+}
+
+function startPredictionAnimation() {
+  if (lastPredictedMarkers.length === 0) return;
+  const startedAt = performance.now();
+  const hours = lastPredictedMarkers[0].predictionHours;
+  // Animated copies, so the real predicted markers keep their final
+  // positions and the panel//click data stays correct after playback.
+  const movers = lastPredictedMarkers.map(m => ({ ...m }));
+
+  setPlayButtonState(true);
+  const frame = now => {
+    // Clamped low as well as high - see the note in pointAlongPath about
+    // rAF timestamps that predate the animation's own start time.
+    const f = Math.max(0, Math.min(1, (now - startedAt) / PREDICTION_ANIMATION_DURATION_MS));
+    movers.forEach((m, i) => {
+      const p = pointAlongPath(lastPredictedMarkers[i].pathPoints, f);
+      if (p) { m.lat = p.lat; m.lng = p.lng; }
+    });
+    updateFireSprites([...lastClusters, ...movers]);
+    // Doubles as the time readout - the button is already where the user is
+    // looking, so it doesn't need a separate label elsewhere.
+    playPredictionBtn.innerHTML = `&#9632; Stop (+${Math.round(f * hours)}h)`;
+
+    if (f >= 1) { stopPredictionAnimation(); return; }
+    predictionAnimationRaf = requestAnimationFrame(frame);
+  };
+  predictionAnimationRaf = requestAnimationFrame(frame);
+}
+
+playPredictionBtn.addEventListener('click', () => {
+  if (predictionAnimationActive()) stopPredictionAnimation();
+  else startPredictionAnimation();
+});
+
 clearPredictionsBtn.addEventListener('click', clearCountrySearch);
 
 predictionToggle.addEventListener('change', () => {
+  syncMonteCarloAvailability();
   if (!predictionToggle.checked) {
     lastPredictedCountry = null;
     lastPredictedFires = null;
     clearPredictions();
+  }
+});
+
+// Re-runs against the already-cached wind/forecast data, so toggling this
+// re-draws from cache rather than re-hitting Open-Meteo.
+monteCarloToggle.addEventListener('change', () => {
+  if (predictionToggle.checked && lastPredictedCountry) {
+    runCountryPredictions(lastPredictedCountry, lastPredictedFires);
   }
 });
 
@@ -1729,6 +2010,7 @@ const addressResult = document.getElementById('addressResult');
 const addressRiskBadge = document.getElementById('addressRiskBadge');
 const addressLocationLine = document.getElementById('addressLocationLine');
 const addressProximityLine = document.getElementById('addressProximityLine');
+const addressProbabilityLine = document.getElementById('addressProbabilityLine');
 
 addressInput.addEventListener('input', () => {
   addressInputClear.style.display = addressInput.value ? 'block' : 'none';
@@ -1746,6 +2028,7 @@ function clearAddressCheck() {
   addressRiskBadge.textContent = '';
   addressLocationLine.textContent = '';
   addressProximityLine.textContent = '';
+  addressProbabilityLine.textContent = '';
 }
 addressInputClear.addEventListener('click', clearAddressCheck);
 
@@ -1765,6 +2048,15 @@ const RISK_THRESHOLDS_KM = {
   catastrophic: { danger: 20, watch: 70 },
 };
 const CONFIDENCE_LABELS = { h: 'high confidence', n: 'moderate confidence', l: 'low confidence' };
+
+// With Monte Carlo on, the address check reports how OFTEN a risk level is
+// reached across sampled wind scenarios, not just whether the single
+// best-guess wind reaches it. If a meaningful share of scenarios land worse
+// than the best guess, the badge is raised to match - a 1-in-3 chance of
+// being in danger shouldn't display as a flat "SAFE" just because the
+// single most likely wind happens to miss. Kept deliberately high enough
+// that one freak outlier scenario can't trigger it.
+const MC_RISK_ESCALATION_FRACTION = 0.30;
 
 // Same tier boundaries as the map's severityBucket - "dangerous" matches
 // the marker color a person would actually see on the map.
@@ -1837,6 +2129,11 @@ async function checkAddressRisk() {
     let worstSource = null; // the raw fire or cluster this result came from
     let worstIsPredicted = false;
     let worstEtaHours = null;
+    // Monte Carlo tallies - stay 0 unless Monte Carlo is on, in which case
+    // they count how many sampled wind scenarios reached each risk level.
+    let mcScenarioCount = 0;
+    let mcDangerCount = 0;
+    let mcWatchCount = 0;
 
     function considerCandidate(source, frp, distanceKm, isPredicted, etaHours) {
       const level = riskLevelFor(frp, distanceKm);
@@ -1882,11 +2179,59 @@ async function checkAddressRisk() {
           const d = haversineKm(lat, lng, dest.lat, dest.lng);
           considerCandidate(c, c.totalFrp, d, true, ADDRESS_CHECK_HOURS);
         });
+
+        // Monte Carlo: the pass above answers "does the single best-guess
+        // wind bring a fire to me?". This answers the more useful question -
+        // "across the range of winds the forecast could plausibly turn out
+        // to be, how OFTEN does one reach me?". Re-uses the wind readings
+        // already fetched above, so it adds no API calls.
+        if (monteCarloEnabled()) {
+          const withWind = clusters
+            .map(c => ({ c, wind: windByPoint.get(`${c.lat},${c.lng}`) }))
+            .filter(x => x.wind);
+          if (withWind.length > 0) {
+            mcScenarioCount = MONTE_CARLO_SAMPLES;
+            for (let s = 0; s < MONTE_CARLO_SAMPLES; s++) {
+              // One scenario = an independent wind draw at each fire, then
+              // "what's the worst thing that reaches me in this scenario?".
+              let scenarioRank = 0;
+              withWind.forEach(({ c, wind }) => {
+                const bearing = wind.wind_blowing_toward_deg + gaussianRandom() * MC_BEARING_SD_DEG;
+                const speed = Math.max(0, wind.wind_speed_kmh * (1 + gaussianRandom() * MC_SPEED_SD_FRAC));
+                const dest = destinationPoint(
+                  c.lat, c.lng, bearing,
+                  spreadDistanceKm(speed, c.totalFrp, ADDRESS_CHECK_HOURS),
+                );
+                const level = riskLevelFor(c.totalFrp, haversineKm(lat, lng, dest.lat, dest.lng));
+                scenarioRank = Math.max(scenarioRank, RISK_RANK[level] || 0);
+              });
+              if (scenarioRank >= RISK_RANK.danger) mcDangerCount++;
+              if (scenarioRank >= RISK_RANK.watch) mcWatchCount++;
+            }
+          }
+        }
       }
     }
 
-    const riskClass = worstLevel === 'danger' ? 'risk-danger' : worstLevel === 'watch' ? 'risk-watch' : 'risk-safe';
-    const riskLabel = worstLevel === 'danger' ? 'DANGER' : worstLevel === 'watch' ? 'WATCH' : 'SAFE';
+    // Raise the badge if a substantial share of sampled scenarios came out
+    // worse than the single best-guess wind did (see MC_RISK_ESCALATION_FRACTION).
+    let displayLevel = worstLevel;
+    let escalatedByMonteCarlo = false;
+    if (mcScenarioCount > 0) {
+      const dangerFrac = mcDangerCount / mcScenarioCount;
+      const watchFrac = mcWatchCount / mcScenarioCount;
+      const currentRank = RISK_RANK[displayLevel] || 0;
+      if (dangerFrac >= MC_RISK_ESCALATION_FRACTION && currentRank < RISK_RANK.danger) {
+        displayLevel = 'danger';
+        escalatedByMonteCarlo = true;
+      } else if (watchFrac >= MC_RISK_ESCALATION_FRACTION && currentRank < RISK_RANK.watch) {
+        displayLevel = 'watch';
+        escalatedByMonteCarlo = true;
+      }
+    }
+
+    const riskClass = displayLevel === 'danger' ? 'risk-danger' : displayLevel === 'watch' ? 'risk-watch' : 'risk-safe';
+    const riskLabel = displayLevel === 'danger' ? 'DANGER' : displayLevel === 'watch' ? 'WATCH' : 'SAFE';
 
     addressRiskBadge.className = riskClass;
     addressRiskBadge.textContent = riskLabel;
@@ -1908,12 +2253,36 @@ async function checkAddressRisk() {
     } else {
       addressProximityLine.textContent = `No fires severe enough to be a concern within ${ADDRESS_SEARCH_RADIUS_KM} km`;
     }
+
+    if (mcScenarioCount === 0) {
+      // Distinguished from "scenarios ran and none reached you" below - with
+      // no fires in range there was nothing to simulate, and claiming
+      // scenarios were run would overstate what was actually checked.
+      addressProbabilityLine.textContent = monteCarloEnabled()
+        ? 'Monte Carlo: no fires close enough to simulate'
+        : '';
+    } else {
+      const pct = n => Math.round((n / mcScenarioCount) * 100);
+      if (mcWatchCount === 0) {
+        addressProbabilityLine.textContent =
+          `Monte Carlo: no fire reached you in any of ${mcScenarioCount} wind scenarios`;
+      } else {
+        const parts = [`${pct(mcWatchCount)}% of ${mcScenarioCount} wind scenarios bring a fire within watch range`];
+        if (mcDangerCount > 0) parts.push(`${pct(mcDangerCount)}% within danger range`);
+        addressProbabilityLine.textContent = `Monte Carlo: ${parts.join(', ')}`;
+        if (escalatedByMonteCarlo) {
+          addressProbabilityLine.textContent +=
+            ' - rating raised accordingly, the single most likely wind alone would have read lower';
+        }
+      }
+    }
     addressResult.style.display = 'block';
   } catch (err) {
     addressRiskBadge.className = '';
     addressRiskBadge.textContent = '';
     addressLocationLine.textContent = 'Error: ' + err.message;
     addressProximityLine.textContent = '';
+    addressProbabilityLine.textContent = '';
     addressResult.style.display = 'block';
   } finally {
     addressCheckBtn.disabled = false;
@@ -1924,6 +2293,168 @@ async function checkAddressRisk() {
 addressCheckBtn.addEventListener('click', checkAddressRisk);
 addressInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') checkAddressRisk();
+});
+
+// --- Fire detail panel (click a marker) ----------------------------------
+// Markers are one batched THREE.Points cloud (one draw call), which is what
+// keeps tens of thousands of them smooth - so there are no per-marker mesh
+// objects to hover-test, and per-marker meshes were rejected outright for
+// exactly that reason. This instead raycasts against the single existing
+// points cloud, and ONLY on click: a hover implementation has to hit-test
+// on every mousemove, which is what made this laggy before. A click happens
+// a few times a minute, so the cost is irrelevant and nothing is added to
+// the per-frame path at all.
+const firePanel = document.getElementById('firePanel');
+const firePanelSwatch = document.getElementById('firePanelSwatch');
+const firePanelTitle = document.getElementById('firePanelTitle');
+const firePanelDetails = document.getElementById('firePanelDetails');
+const firePanelNote = document.getElementById('firePanelNote');
+const firePanelClose = document.getElementById('firePanelClose');
+
+const fireRaycaster = new THREE.Raycaster();
+const firePointer = new THREE.Vector2();
+
+function closeFirePanel() { firePanel.classList.remove('open'); }
+firePanelClose.addEventListener('click', closeFirePanel);
+
+// Click tolerance in screen pixels, converted to the world-space threshold
+// three.js wants. Without the conversion the tolerance would be a fixed
+// world distance, so clicking would feel precise zoomed in and impossible
+// zoomed out (or vice versa).
+const FIRE_CLICK_TOLERANCE_PX = 12;
+
+// Squared radius of the globe surface, derived from globe.gl's own
+// coordinate system rather than hardcoded, for the horizon test below:
+// a point P is on the visible side iff P dot cameraPosition >= radius^2.
+let _globeSurfaceRadiusSq = null;
+function globeSurfaceRadiusSq() {
+  if (_globeSurfaceRadiusSq === null) {
+    const c = world.getCoords(0, 0, 0);
+    _globeSurfaceRadiusSq = c.x * c.x + c.y * c.y + c.z * c.z;
+  }
+  return _globeSurfaceRadiusSq;
+}
+
+function raycastThresholdForCamera(camera, canvasHeightPx) {
+  const camDistance = camera.position.length();
+  const worldHeightAtCam = 2 * camDistance * Math.tan((camera.fov * Math.PI) / 180 / 2);
+  return (worldHeightAtCam / canvasHeightPx) * FIRE_CLICK_TOLERANCE_PX;
+}
+
+function severityLabel(frp) {
+  return severityTierName(frp).replace(/^./, ch => ch.toUpperCase());
+}
+
+function describeClusterConfidence(marker) {
+  if (!marker.fires || marker.fires.length === 0) return null;
+  const counts = {};
+  marker.fires.forEach(f => {
+    const c = (f.confidence || '').toString().toLowerCase();
+    counts[c] = (counts[c] || 0) + 1;
+  });
+  const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  return CONFIDENCE_LABELS[dominant] || dominant || null;
+}
+
+function newestDetectionAgeHours(marker) {
+  if (!marker.fires || marker.fires.length === 0) return null;
+  let newest = Infinity;
+  marker.fires.forEach(f => {
+    if (!f.acq_date || !f.acq_time) return;
+    const age = fireAgeHours(f);
+    if (Number.isFinite(age)) newest = Math.min(newest, age);
+  });
+  return Number.isFinite(newest) ? newest : null;
+}
+
+function openFirePanel(marker) {
+  const [r, g, b] = marker.faded ? fadeRgb(severityBucket(marker.totalFrp)) : severityBucket(marker.totalFrp);
+  firePanelSwatch.style.background = `rgb(${r},${g},${b})`;
+  firePanelTitle.textContent = marker.predicted
+    ? `${severityLabel(marker.totalFrp)} - predicted position`
+    : `${severityLabel(marker.totalFrp)} fire${marker.count > 1 ? ' cluster' : ''}`;
+
+  const rows = [];
+  const add = (label, value) => { if (value !== null && value !== undefined) rows.push([label, value]); };
+
+  add('Location', `${marker.lat.toFixed(3)}, ${marker.lng.toFixed(3)}`);
+  if (marker.count > 1) add('Detections', marker.count.toLocaleString());
+  add('Total FRP', `${marker.totalFrp.toFixed(1)} MW`);
+  if (marker.count > 1) add('Peak FRP', `${marker.maxFrp.toFixed(1)} MW`);
+
+  // Ground-sourced (CWFIS) fires carry real hectares; satellite ones don't.
+  const hectares = marker.fires?.find(f => f.ha !== null && f.ha !== undefined)?.ha;
+  if (hectares !== undefined) add('Area burned', `${Math.round(hectares).toLocaleString()} ha`);
+
+  add('Confidence', describeClusterConfidence(marker));
+  const age = newestDetectionAgeHours(marker);
+  if (age !== null) add('Last detected', age < 1 ? 'under 1h ago' : `${age.toFixed(0)}h ago`);
+
+  if (marker.predicted) {
+    add('Projection', `${marker.predictionHours}h ahead`);
+    if (marker.windSpeedKmh !== undefined) add('Wind', `${marker.windSpeedKmh.toFixed(0)} km/h`);
+  }
+
+  firePanelDetails.innerHTML = rows
+    .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)
+    .join('');
+
+  // The world view's clusters are aggregated server-side and don't carry
+  // their raw detections, so confidence/age genuinely aren't available
+  // there - saying so beats silently omitting the rows.
+  if (!marker.fires && !marker.predicted) {
+    firePanelNote.textContent = 'Search a country for per-detection confidence and timing.';
+  } else if (marker.predicted) {
+    firePanelNote.textContent = 'Estimated position, not an observation.';
+  } else {
+    firePanelNote.textContent = '';
+  }
+
+  firePanel.classList.add('open');
+}
+
+// Only treat a pointer release as a click if it barely moved - otherwise
+// every globe drag that happens to end over a marker would open the panel.
+let pointerDownAt = null;
+const DRAG_SLOP_PX = 5;
+
+function globeCanvas() { return world.renderer().domElement; }
+
+globeCanvas().addEventListener('pointerdown', e => {
+  pointerDownAt = { x: e.clientX, y: e.clientY };
+});
+
+globeCanvas().addEventListener('pointerup', e => {
+  if (!pointerDownAt) return;
+  const moved = Math.hypot(e.clientX - pointerDownAt.x, e.clientY - pointerDownAt.y);
+  pointerDownAt = null;
+  if (moved > DRAG_SLOP_PX) return; // a drag, not a click
+
+  const canvas = globeCanvas();
+  const rect = canvas.getBoundingClientRect();
+  firePointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  firePointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+  const camera = world.camera();
+  fireRaycaster.params.Points.threshold = raycastThresholdForCamera(camera, rect.height);
+  fireRaycaster.setFromCamera(firePointer, camera);
+
+  const hits = fireRaycaster.intersectObject(fireSpritesObject, false);
+  if (hits.length === 0) { closeFirePanel(); return; }
+
+  // Markers on the far side of the globe are hidden visually but still
+  // register as raycast hits, so a click near the edge could otherwise
+  // select a fire on the opposite side of the planet. Rejecting those with
+  // an analytic horizon test rather than a second scene raycast, because
+  // raycasting the scene also hits globe.gl's atmosphere shell (which sits
+  // in FRONT of every marker) and would reject all of them.
+  const nearest = hits
+    .filter(h => h.point && h.point.dot(camera.position) >= globeSurfaceRadiusSq())
+    .sort((a, b) => a.distance - b.distance)[0];
+  if (!nearest) { closeFirePanel(); return; }
+
+  const marker = renderedFireMarkers[nearest.index];
+  if (marker) openFirePanel(marker); else closeFirePanel();
 });
 
 loadFires().finally(() => {
