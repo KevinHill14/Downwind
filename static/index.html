@@ -20,6 +20,12 @@
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;
   }
   #optimizePanel .switchRow { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+  #saveImageBtn {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 7px 12px; font-size: 12px; cursor: pointer; margin-top: 2px;
+  }
+  #saveImageBtn:hover { background: #555; }
+  #saveImageBtn:disabled { opacity: 0.6; cursor: default; }
   .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider {
@@ -315,6 +321,7 @@
     </div>
     <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="3" />
   </div>
+  <button id="saveImageBtn">&#128247; Save image</button>
 </div>
 <div id="continentPanel">
   <div id="quickLookButtons">
@@ -512,13 +519,63 @@ function clearHomeMarker() {
   homeMarkerGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(0), 3));
 }
 
+// Monte Carlo uncertainty footprint: the region the sampled scenarios
+// actually land in, as one shaded shape per fire.
+//
+// This replaces drawing every sample as its own line. Hundreds of
+// near-parallel translucent lines read as noise and cost one line object
+// each, whereas the thing a viewer actually wants from Monte Carlo is
+// "how wide is the range of outcomes" - which is a SHAPE, not a bundle of
+// strands. Every fire's footprint lives in this single merged mesh (one
+// draw call for all of them), so unlike the old line fan there's no need
+// to ration it to the most intense markers.
+const MC_FOOTPRINT_ALTITUDE = 0.006; // under the projected path (0.008)
+const mcFootprintGeometry = new THREE.BufferGeometry();
+const mcFootprintMaterial = new THREE.MeshBasicMaterial({
+  color: 0xffa040,
+  transparent: true,
+  opacity: 0.16,
+  depthWrite: false, // translucent - must not occlude the globe or each other
+  side: THREE.DoubleSide,
+});
+const mcFootprintObject = new THREE.Mesh(mcFootprintGeometry, mcFootprintMaterial);
+
+// Each footprint is { origin: {lat,lng}, ends: [{lat,lng}, ...] }. The ends
+// are the scenario endpoints; fanning them from the origin in bearing order
+// gives the spread cone directly, with no hull algorithm needed - every
+// sample starts at the fire and radiates outward, so bearing order IS the
+// outline order.
+function updateMonteCarloFootprints(footprints) {
+  const tris = [];
+  footprints.forEach(({ origin, ends }) => {
+    if (!ends || ends.length < 2) return;
+    const byBearing = ends
+      .map(p => ({ p, b: bearingBetween(origin.lat, origin.lng, p.lat, p.lng) }))
+      .sort((a, b) => a.b - b.b)
+      .map(x => x.p);
+    const o = world.getCoords(origin.lat, origin.lng, MC_FOOTPRINT_ALTITUDE);
+    for (let i = 0; i < byBearing.length - 1; i++) {
+      const a = world.getCoords(byBearing[i].lat, byBearing[i].lng, MC_FOOTPRINT_ALTITUDE);
+      const b = world.getCoords(byBearing[i + 1].lat, byBearing[i + 1].lng, MC_FOOTPRINT_ALTITUDE);
+      tris.push(o.x, o.y, o.z, a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  });
+  mcFootprintGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tris), 3));
+  mcFootprintGeometry.computeBoundingSphere();
+}
+
+function clearMonteCarloFootprints() {
+  updateMonteCarloFootprints([]);
+}
+
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
   // Custom objects host the two sprite clouds under the globe - their
   // buffers are filled directly (see updateFireSprites/updateHomeMarker),
   // not through globe.gl's per-datum update path.
-  .customLayerData([{ obj: fireSpritesObject }, { obj: homeMarkerObject }])
+  // Footprint first so it renders beneath the markers and paths it belongs to.
+  .customLayerData([{ obj: mcFootprintObject }, { obj: fireSpritesObject }, { obj: homeMarkerObject }])
   .customThreeObject(d => d.obj)
   .customThreeObjectUpdate(() => {})
   .polygonCapColor(() => 'rgba(0,0,0,0)')
@@ -1275,6 +1332,18 @@ function haversineKm(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Initial great-circle bearing from one point to another (0=N, 90=E).
+// Used to order Monte Carlo scenario endpoints around their fire so they
+// can be fanned into an uncertainty footprint.
+function bearingBetween(lat1, lng1, lat2, lng2) {
+  const p1 = (lat1 * Math.PI) / 180;
+  const p2 = (lat2 * Math.PI) / 180;
+  const dl = ((lng2 - lng1) * Math.PI) / 180;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 // Great-circle destination point, `distanceKm` from (lat, lng) along
 // bearingDeg (0=N, 90=E).
 function destinationPoint(lat, lng, bearingDeg, distanceKm) {
@@ -1307,19 +1376,15 @@ function spreadDistanceKm(windSpeedKmh, frp, hours) {
 // shows how confident the projection actually is instead of implying a
 // precision it doesn't have. Costs no extra API calls - it re-uses the
 // wind/forecast data already fetched for the deterministic run.
-const MONTE_CARLO_SAMPLES = 18;
-// Sample paths are the expensive part to render (each is its own line), so
-// only the most intense fires get a fan - at 18 samples this is the top ~38
-// markers. The deterministic path is still drawn for every marker.
-const MONTE_CARLO_PATH_BUDGET = 700;
+// Higher than it needed to be when every sample was its own line: the
+// footprint merges them all into one mesh, so extra samples cost a couple
+// of triangles rather than a draw call, and a smoother outline is free.
+const MONTE_CARLO_SAMPLES = 32;
 // Forecast wind error grows with lead time; these are whole-window
 // approximations, not calibrated per-hour figures.
 const MC_BEARING_SD_DEG = 22;    // scenario-level directional uncertainty
 const MC_SPEED_SD_FRAC = 0.28;   // +/- ~28% on wind speed
 const MC_STEP_BEARING_SD_DEG = 7; // extra per-step wobble within a scenario
-const MC_SAMPLE_COLOR = 'rgba(255,168,64,0.30)';
-const MC_SAMPLE_PATH_STROKE = 0.5;
-const MC_SAMPLE_ARC_STROKE = 0.03;
 
 // Standard normal via Box-Muller. Gaussian rather than uniform because
 // forecast error really is bell-shaped - most samples should land near the
@@ -1338,10 +1403,6 @@ function monteCarloEnabled() {
   return predictionToggle.checked && monteCarloToggle.checked;
 }
 
-// How many of the (FRP-sorted) targets get a sample fan, given the render budget.
-function monteCarloTargetLimit() {
-  return Math.max(1, Math.floor(MONTE_CARLO_PATH_BUDGET / MONTE_CARLO_SAMPLES));
-}
 
 // Circular-mean blend from bearing a toward bearing b by fraction w (0 =
 // pure a, 1 = pure b) - a plain weighted average breaks down near the
@@ -1390,6 +1451,7 @@ function clearPredictions() {
   updateArcsLayer();
   predictionPaths = [];
   world.pathsData(predictionPaths);
+  clearMonteCarloFootprints();
   lastClusters.forEach(c => { c.faded = false; });
   updateFireSprites(lastClusters);
   setPredictionPanelVisible(false);
@@ -1521,12 +1583,10 @@ async function runCountryPredictions(country, fires) {
   const predictedMarkers = [];
   const newArcs = [];
   const newPaths = [];
-  // Monte Carlo sample geometry, kept separate so it can be drawn beneath
-  // the deterministic result rather than over it.
-  const mcArcs = [];
-  const mcPaths = [];
+  // Monte Carlo scenario endpoints per fire, merged into one footprint mesh
+  // below rather than drawn as individual sample lines.
+  const mcFootprints = [];
   const mcOn = monteCarloEnabled();
-  const mcLimit = monteCarloTargetLimit();
   let mcSampledTargets = 0;
 
   if (strength === 1) {
@@ -1558,24 +1618,20 @@ async function runCountryPredictions(country, fires) {
 
       // Same projection, re-run with the wind perturbed inside its plausible
       // error - the spread of endpoints IS the uncertainty estimate.
-      if (mcOn && targetIndex < mcLimit) {
+      if (mcOn) {
         mcSampledTargets++;
+        const ends = [];
         for (let s = 0; s < MONTE_CARLO_SAMPLES; s++) {
           const bearing = wind.wind_blowing_toward_deg + gaussianRandom() * MC_BEARING_SD_DEG;
           const speed = Math.max(0, wind.wind_speed_kmh * (1 + gaussianRandom() * MC_SPEED_SD_FRAC));
-          const sampleDest = destinationPoint(c.lat, c.lng, bearing, spreadDistanceKm(speed, c.totalFrp, hours));
-          mcArcs.push({
-            startLat: c.lat, startLng: c.lng,
-            endLat: sampleDest.lat, endLng: sampleDest.lng,
-            color: MC_SAMPLE_COLOR, stroke: MC_SAMPLE_ARC_STROKE, animated: false,
-          });
+          ends.push(destinationPoint(c.lat, c.lng, bearing, spreadDistanceKm(speed, c.totalFrp, hours)));
         }
+        mcFootprints.push({ origin: { lat: c.lat, lng: c.lng }, ends });
       }
     });
 
     if (runId !== predictionRunId) return; // superseded - don't resurrect cleared arcs
-    // Samples first so the solid deterministic arc draws on top of its fan.
-    predictionArcs = [...mcArcs, ...newArcs];
+    predictionArcs = newArcs;
     updateArcsLayer();
   } else {
     // Stage 2+: hourly wind forecast instead of one static snapshot, stepped
@@ -1745,15 +1801,20 @@ async function runCountryPredictions(country, fires) {
 
       const { lat, lng, lastWindSpeed, points } = walkTrajectory(null);
 
-      if (mcOn && targetIndex < mcLimit) {
+      if (mcOn) {
         mcSampledTargets++;
+        const ends = [];
         for (let s = 0; s < MONTE_CARLO_SAMPLES; s++) {
           const sample = walkTrajectory({
             bearingBias: gaussianRandom() * MC_BEARING_SD_DEG,
             speedScale: Math.max(0.1, 1 + gaussianRandom() * MC_SPEED_SD_FRAC),
           });
-          mcPaths.push({ points: sample.points, color: MC_SAMPLE_COLOR, stroke: MC_SAMPLE_PATH_STROKE });
+          // Only where the scenario ENDS matters for the footprint - the
+          // bent route it took to get there is what the deterministic path
+          // already shows.
+          ends.push({ lat: sample.lat, lng: sample.lng });
         }
+        mcFootprints.push({ origin: { lat: c.lat, lng: c.lng }, ends });
       }
 
       c.faded = true; // dim the fire's current position in place
@@ -1762,10 +1823,11 @@ async function runCountryPredictions(country, fires) {
     });
 
     if (runId !== predictionRunId) return; // superseded - don't resurrect cleared arcs/paths
-    // Samples first so the solid deterministic path draws on top of its fan.
-    predictionPaths = [...mcPaths, ...newPaths];
+    predictionPaths = newPaths;
     world.pathsData(predictionPaths);
   }
+
+  updateMonteCarloFootprints(mcFootprints);
 
   if (runId !== predictionRunId) return; // superseded - don't clobber current state with stale results
   updateFireSprites([...lastClusters, ...predictedMarkers]);
@@ -1775,7 +1837,7 @@ async function runCountryPredictions(country, fires) {
 
   const projectedCount = strength === 1 ? newArcs.length : newPaths.length;
   const mcNote = mcOn && mcSampledTargets > 0
-    ? `<p>Monte Carlo: ${MONTE_CARLO_SAMPLES} wind scenarios each for the ${mcSampledTargets} most intense marker(s) - the fan shows how uncertain the projection is</p>`
+    ? `<p>Monte Carlo: ${MONTE_CARLO_SAMPLES} wind scenarios each for ${mcSampledTargets} marker(s) - the shaded area is where they land</p>`
     : '';
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
@@ -2456,6 +2518,113 @@ globeCanvas().addEventListener('pointerup', e => {
   const marker = renderedFireMarkers[nearest.index];
   if (marker) openFirePanel(marker); else closeFirePanel();
 });
+
+// --- Save / share the current view as an image ---------------------------
+// On mobile this hands the image to the native share sheet, which is what
+// exposes "Save Image" (camera roll) alongside AirDrop/messaging apps -
+// the web has no direct camera-roll API, so the share sheet IS the answer.
+// Desktop has no share sheet worth using, so it falls back to a download.
+const saveImageBtn = document.getElementById('saveImageBtn');
+
+function captureGlobePng() {
+  const renderer = world.renderer();
+  const canvas = renderer.domElement;
+  // A WebGL drawing buffer is cleared after each frame unless the context
+  // was created with preserveDrawingBuffer (it wasn't - that costs
+  // performance on every frame for a feature used once in a while). So the
+  // buffer must be re-rendered and read back in the SAME tick; reading it
+  // any later reliably yields a blank image.
+  renderer.render(world.scene(), world.camera());
+  return canvas.toDataURL('image/png');
+}
+
+// Composites the globe onto a captioned canvas, so a shared image explains
+// itself instead of being an anonymous orange globe - and carries the data
+// attribution with it.
+function buildShareableImage(globeDataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const BAR = Math.max(76, Math.round(img.height * 0.125));
+      const out = document.createElement('canvas');
+      out.width = img.width;
+      out.height = img.height + BAR;
+      const ctx = out.getContext('2d');
+
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(img, 0, 0);
+
+      ctx.fillStyle = '#0d0d0d';
+      ctx.fillRect(0, img.height, out.width, BAR);
+
+      // Proportional layout, leaving ~14% of the bar as bottom margin so the
+      // credits line never crowds the edge at any capture size.
+      const pad = Math.round(BAR * 0.26);
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#ff8a3d';
+      ctx.font = `600 ${Math.round(BAR * 0.26)}px system-ui, sans-serif`;
+      ctx.fillText('Fire Tracker', pad, img.height + BAR * 0.14);
+
+      const status = (document.getElementById('status').textContent || '').trim();
+      ctx.fillStyle = '#ddd';
+      ctx.font = `${Math.round(BAR * 0.19)}px system-ui, sans-serif`;
+      ctx.fillText(`${status} - ${new Date().toLocaleString()}`, pad, img.height + BAR * 0.46);
+
+      ctx.fillStyle = '#777';
+      ctx.font = `${Math.round(BAR * 0.155)}px system-ui, sans-serif`;
+      ctx.fillText('Data: NASA FIRMS - NRCan CWFIS - Open-Meteo', pad, img.height + BAR * 0.71);
+
+      out.toBlob(blob => resolve(blob), 'image/png');
+    };
+    img.src = globeDataUrl;
+  });
+}
+
+async function saveCurrentView() {
+  saveImageBtn.disabled = true;
+  const originalLabel = saveImageBtn.innerHTML;
+  saveImageBtn.textContent = 'Preparing...';
+  try {
+    const blob = await buildShareableImage(captureGlobePng());
+    if (!blob) throw new Error('could not encode image');
+    const filename = `fire-tracker-${new Date().toISOString().slice(0, 10)}.png`;
+    const file = new File([blob], filename, { type: 'image/png' });
+
+    // canShare({files}) is the real capability check - plain `navigator.share`
+    // exists in places that still can't take a file attachment.
+    if (navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: 'Fire Tracker' });
+        saveImageBtn.textContent = 'Shared';
+      } catch (err) {
+        // Dismissing the share sheet throws AbortError - a choice, not a fault.
+        saveImageBtn.textContent = err.name === 'AbortError' ? originalLabel : 'Share failed';
+      }
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      // Revoked on a delay, not immediately: the browser reads the blob
+      // asynchronously after the click, and pulling the URL out from under
+      // it can cancel the download.
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      saveImageBtn.textContent = 'Saved';
+    }
+  } catch (err) {
+    saveImageBtn.textContent = 'Failed';
+    console.error('[save-image]', err);
+  } finally {
+    setTimeout(() => {
+      saveImageBtn.innerHTML = originalLabel;
+      saveImageBtn.disabled = false;
+    }, 1600);
+  }
+}
+
+saveImageBtn.addEventListener('click', saveCurrentView);
 
 loadFires().finally(() => {
   document.getElementById('loadingOverlay').style.display = 'none';

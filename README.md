@@ -45,7 +45,7 @@ Select a country (via search) to see predicted spread for its active fires, at 4
 
 Prediction window is adjustable 1–7 days. This is explicitly a demo-grade approximation, not a physical fire-behavior simulation — good for visualizing *a* plausible spread direction, not for real operational decisions.
 
-**Monte Carlo mode** (toggle, off by default — only available while Prediction is on): a single projected line quietly implies the forecast wind is exact. With this on, the same spread math is re-run 18 times per fire with the wind perturbed within its realistic forecast error, and the resulting fan is drawn underneath the main projection — so you can see *how confident the projection actually is*. A tight fan means the wind is consistent and the projection is trustworthy; a wide one means it genuinely could go several ways. Costs no extra API calls (it re-uses the wind data already fetched), and to keep rendering fast only the most intense markers get a fan.
+**Monte Carlo mode** (toggle, off by default — only available while Prediction is on): a single projected line quietly implies the forecast wind is exact. With this on, the same spread math is re-run 32 times per fire with the wind perturbed within its realistic forecast error, and the region those scenarios land in is shaded underneath the main projection — so you can see *how confident the projection actually is*. A tight footprint means the wind is consistent and the projection is trustworthy; a wide one means it genuinely could go several ways. Costs no extra API calls (it re-uses the wind data already fetched), and since every fire's footprint lives in one merged mesh, every marker gets one.
 
 **Playback** — a "See animation" button walks every fire from where it is now to its projected position over the prediction window, so the spread reads as motion rather than a static line. The button doubles as the clock (`Stop (+28h)`). Only the markers move; the projected paths stay drawn underneath as the route, which keeps it to a single buffer update per frame instead of rebuilding hundreds of lines.
 
@@ -53,6 +53,9 @@ Prediction window is adjustable 1–7 days. This is explicitly a demo-grade appr
 Type an address, and the app geocodes it, looks at nearby fires (including their predicted spread), and returns a **Safe / Watch / Danger** badge with the nearest real threat's distance, confidence, and either how long ago it was detected or its predicted time of arrival.
 
 With **Monte Carlo** on, it also reports how often a fire actually reaches you across sampled wind scenarios — *"100% of 18 wind scenarios bring a fire within watch range, 6% within danger range"* — instead of a single yes/no. If a substantial share of scenarios come out worse than the single best-guess wind, the rating is raised to match and says so: a 1-in-3 chance of being in danger shouldn't display as a flat "SAFE" just because the most likely wind happens to miss.
+
+### Save / share the current view
+A "Save image" button captures the globe exactly as it looks and adds a caption bar with the live fire count, timestamp, and data credits. On mobile it hands the image to the native share sheet — which is where "Save Image" (camera roll) lives, alongside messaging apps; on desktop it downloads.
 
 ### Click a fire for details
 Click any marker for its exact position, detection count, total and peak FRP, area burned (ground-sourced fires), confidence, and how recently it was detected — or, for a projected marker, its lead time and the wind driving it. Implemented by raycasting the existing batched marker cloud **on click only**; hover would mean hit-testing on every mouse move, which is what made an earlier attempt at this laggy.
@@ -172,6 +175,7 @@ These aren't environment variables — they're constants in the code, listed her
 | `MONTE_CARLO_PATH_BUDGET` | 700 | Max sample paths rendered at once; caps how many markers get a fan (budget ÷ samples). |
 | `MC_BEARING_SD_DEG` | 22° | Assumed scenario-level wind direction uncertainty. |
 | `MC_SPEED_SD_FRAC` | 0.28 | Assumed wind speed uncertainty (±~28%). |
+| `MC_FOOTPRINT_ALTITUDE` | 0.006 | Height of the uncertainty footprint above the globe (under the projected path). |
 | `MC_RISK_ESCALATION_FRACTION` | 0.30 | Share of scenarios that must reach a risk level before the address check raises its rating to match. |
 | `PREDICTION_ANIMATION_DURATION_MS` | 7000 | How long the "See animation" playback takes to cover the whole prediction window. |
 | `FIRE_CLICK_TOLERANCE_PX` | 12 | Click tolerance for selecting a fire marker, in screen pixels (converted to world units per zoom level). |
@@ -234,6 +238,20 @@ The prediction feature depends on a free third-party weather API, and getting it
 The broader lesson from this whole chain: the first few fixes were all real improvements, but each was solving one layer of a problem that had another layer underneath it, discoverable only by testing against real production logs rather than local conditions (a personal, non-shared IP never reproduced the underlying issue at all).
 
 ---
+
+## Validating the prediction math
+
+`validate_predictions.py` measures the spread projection against what actually happened: it takes fires as they were on a past day, re-runs the same projection using the wind that really blew, and compares against detections that followed.
+
+```bash
+python validate_predictions.py --bbox=-10,36,4,44 --days-ago 4 --hours 24
+```
+
+It reports error against a **persistence baseline** ("predict the fire doesn't move"), because fire detections cluster — any prediction lands near *some* fire, so absolute error alone means nothing. It also sweeps the spread-rate constant and tests whether wind direction carries signal.
+
+**What it found, honestly:** the projection does *not* beat persistence, and error grows the further it projects. That looks damning, but the ground truth turns out to be biased — smoke blows downwind and obscures satellite thermal detection there, so detections are systematically missing exactly where spread is predicted. Measured directly, new detections skew *upwind* (36–61° from reported wind, versus 90° for random). That's a detection artifact, not fire behaviour: Open-Meteo uses the meteorological convention, and the app's handling of it is correct.
+
+The honest conclusion is that point detections can't cleanly validate a spread model — that needs mapped fire perimeters. The script stands as a regression check on the math and a sanity check on magnitudes, and it is deliberately written to argue against its own headline number rather than quote it.
 
 ## Known limitations / ideas not built yet
 
