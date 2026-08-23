@@ -103,6 +103,12 @@
     border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
   }
   #predictionPanel button:hover { background: #555; }
+  /* Ties the legend text to the cyan shape on the globe. */
+  .mcSwatch {
+    display: inline-block; width: 11px; height: 11px; margin-right: 6px;
+    background: rgba(47,212,255,0.30); border: 1px solid rgba(127,233,255,0.8);
+    border-radius: 2px; vertical-align: baseline;
+  }
   #predictionPanel button + button { margin-left: 6px; }
   #playPrediction { display: none; }
   #playPrediction.available { display: inline-block; }
@@ -529,39 +535,90 @@ function clearHomeMarker() {
 // strands. Every fire's footprint lives in this single merged mesh (one
 // draw call for all of them), so unlike the old line fan there's no need
 // to ration it to the most intense markers.
+// Cyan, deliberately: the severity scale already owns yellow/orange/red/
+// purple and the terrain underneath is brown, so an orange footprint (the
+// first attempt) blended into the very thing it annotates. A cool colour
+// no fire can take reads instantly as "this is a projection, not a fire".
 const MC_FOOTPRINT_ALTITUDE = 0.006; // under the projected path (0.008)
 const mcFootprintGeometry = new THREE.BufferGeometry();
 const mcFootprintMaterial = new THREE.MeshBasicMaterial({
-  color: 0xffa040,
+  color: 0x2fd4ff,
   transparent: true,
-  opacity: 0.16,
+  opacity: 0.13,
   depthWrite: false, // translucent - must not occlude the globe or each other
   side: THREE.DoubleSide,
 });
 const mcFootprintObject = new THREE.Mesh(mcFootprintGeometry, mcFootprintMaterial);
 
-// Each footprint is { origin: {lat,lng}, ends: [{lat,lng}, ...] }. The ends
-// are the scenario endpoints; fanning them from the origin in bearing order
-// gives the spread cone directly, with no hull algorithm needed - every
-// sample starts at the fire and radiates outward, so bearing order IS the
-// outline order.
+// The fill alone has no defined edge, so at a glance you can't tell where
+// the range of outcomes actually stops. This outlines the wedge - the arc
+// through the outermost scenarios, closed back to the fire - which is the
+// part that carries the information.
+const mcOutlineGeometry = new THREE.BufferGeometry();
+const mcOutlineMaterial = new THREE.LineBasicMaterial({
+  color: 0x7fe9ff,
+  transparent: true,
+  opacity: 0.5,
+  depthWrite: false,
+});
+const mcOutlineObject = new THREE.LineSegments(mcOutlineGeometry, mcOutlineMaterial);
+
+// Convex hull (monotone chain) of points already flattened to a local
+// tangent plane. Ordering scenario endpoints by bearing instead - the first
+// attempt - produces a sawtooth outline, because neighbouring bearings can
+// have very different distances once speed is jittered. The hull is the
+// boundary of "everywhere the scenarios landed", which is the actual claim
+// the shape is making.
+function convexHull(points) {
+  if (points.length < 3) return points.slice();
+  const pts = points.slice().sort((a, b) => (a.x - b.x) || (a.y - b.y));
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const build = src => {
+    const out = [];
+    for (const p of src) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
+      out.push(p);
+    }
+    out.pop();
+    return out;
+  };
+  return build(pts).concat(build(pts.slice().reverse()));
+}
+
+// Each footprint is { origin: {lat,lng}, ends: [{lat,lng}, ...] }: the fire
+// plus where every sampled scenario ended up. The rendered region is the
+// hull of all of them, so the fire itself is always inside its own footprint.
 function updateMonteCarloFootprints(footprints) {
   const tris = [];
+  const lines = [];
   footprints.forEach(({ origin, ends }) => {
     if (!ends || ends.length < 2) return;
-    const byBearing = ends
-      .map(p => ({ p, b: bearingBetween(origin.lat, origin.lng, p.lat, p.lng) }))
-      .sort((a, b) => a.b - b.b)
-      .map(x => x.p);
-    const o = world.getCoords(origin.lat, origin.lng, MC_FOOTPRINT_ALTITUDE);
-    for (let i = 0; i < byBearing.length - 1; i++) {
-      const a = world.getCoords(byBearing[i].lat, byBearing[i].lng, MC_FOOTPRINT_ALTITUDE);
-      const b = world.getCoords(byBearing[i + 1].lat, byBearing[i + 1].lng, MC_FOOTPRINT_ALTITUDE);
-      tris.push(o.x, o.y, o.z, a.x, a.y, a.z, b.x, b.y, b.z);
+    // Flattened to a local plane before hulling - longitude is scaled by
+    // cos(lat) so the hull isn't skewed at high latitudes.
+    const cosLat = Math.cos((origin.lat * Math.PI) / 180);
+    const planar = [origin, ...ends].map(p => ({
+      x: (p.lng - origin.lng) * cosLat,
+      y: p.lat - origin.lat,
+      lat: p.lat,
+      lng: p.lng,
+    }));
+    const hull = convexHull(planar);
+    if (hull.length < 3) return;
+
+    const v = hull.map(p => world.getCoords(p.lat, p.lng, MC_FOOTPRINT_ALTITUDE));
+    for (let i = 1; i < v.length - 1; i++) {
+      tris.push(v[0].x, v[0].y, v[0].z, v[i].x, v[i].y, v[i].z, v[i + 1].x, v[i + 1].y, v[i + 1].z);
+    }
+    for (let i = 0; i < v.length; i++) {
+      const a = v[i];
+      const b = v[(i + 1) % v.length];
+      lines.push(a.x, a.y, a.z, b.x, b.y, b.z);
     }
   });
   mcFootprintGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tris), 3));
   mcFootprintGeometry.computeBoundingSphere();
+  mcOutlineGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(lines), 3));
+  mcOutlineGeometry.computeBoundingSphere();
 }
 
 function clearMonteCarloFootprints() {
@@ -575,7 +632,10 @@ const world = Globe()
   // buffers are filled directly (see updateFireSprites/updateHomeMarker),
   // not through globe.gl's per-datum update path.
   // Footprint first so it renders beneath the markers and paths it belongs to.
-  .customLayerData([{ obj: mcFootprintObject }, { obj: fireSpritesObject }, { obj: homeMarkerObject }])
+  .customLayerData([
+    { obj: mcFootprintObject }, { obj: mcOutlineObject },
+    { obj: fireSpritesObject }, { obj: homeMarkerObject },
+  ])
   .customThreeObject(d => d.obj)
   .customThreeObjectUpdate(() => {})
   .polygonCapColor(() => 'rgba(0,0,0,0)')
@@ -1836,8 +1896,12 @@ async function runCountryPredictions(country, fires) {
   playPredictionBtn.classList.toggle('available', predictedMarkers.length > 0);
 
   const projectedCount = strength === 1 ? newArcs.length : newPaths.length;
+  // Spells out what the cyan shape means - without this the footprint is
+  // just an unexplained blob next to a fire.
   const mcNote = mcOn && mcSampledTargets > 0
-    ? `<p>Monte Carlo: ${MONTE_CARLO_SAMPLES} wind scenarios each for ${mcSampledTargets} marker(s) - the shaded area is where they land</p>`
+    ? `<p><span class="mcSwatch"></span>Monte Carlo: ${MONTE_CARLO_SAMPLES} wind scenarios per fire.
+       The cyan area covers everywhere they landed - wide means the wind could
+       genuinely go several ways, tight means the projection is confident.</p>`
     : '';
   predictionInfo.innerHTML = `
     <p>${country.name}: ${fires.length} active fire(s) detected</p>
