@@ -32,6 +32,33 @@
   }
   #smokeCheckBtn:hover { background: #555; }
   #smokeCheckBtn.active { background: #3d5a66; }
+  #historyBtn {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 7px 12px; font-size: 12px; cursor: pointer; margin-top: 2px;
+  }
+  #historyBtn:hover { background: #555; }
+  #historyBtn.active { background: #5a4a2a; }
+
+  /* Top centre: the one part of the desktop layout nothing else occupies
+     (status sits top-left, options top-right), so playback controls don't
+     have to fight the four panels along the bottom. */
+  #historyBar {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%); z-index: 12;
+    display: none; align-items: center; gap: 10px;
+    background: rgba(20,20,20,0.92); color: #eee; border: 1px solid #444;
+    padding: 8px 12px; border-radius: 8px; font-size: 12px;
+  }
+  #historyBar.open { display: flex; }
+  #historyBar button {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 4px 9px; font-size: 12px; cursor: pointer; line-height: 1.2;
+  }
+  #historyBar button:hover { background: #555; }
+  #historyScrub { width: 190px; }
+  /* Fixed width and tabular figures so the bar doesn't jitter as the date
+     changes underneath it during playback. */
+  #historyDate { min-width: 118px; text-align: center; font-variant-numeric: tabular-nums; }
+  #historyClose { color: #999; }
   .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider {
@@ -325,6 +352,12 @@
       left: 12px; right: 12px; bottom: 12px; width: auto; transform: none;
       max-height: 60vh; overflow-y: auto;
     }
+
+    /* Top centre is taken by the status readout on mobile, so the playback
+       bar drops below it and spans the width. */
+    #historyBar { top: 62px; left: 12px; right: 12px; transform: none; }
+    #historyScrub { flex: 1; width: auto; }
+    #historyDate { min-width: 92px; font-size: 11px; }
     /* Predictions replace "Am I in danger?" in the same slot on mobile -
        no room for both. See setPredictionPanelVisible. */
     #addressPanel.hiddenMobile, #predictionPanel.hiddenMobile {
@@ -399,6 +432,7 @@
     </div>
     <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="3" />
   </div>
+  <button id="historyBtn">&#128336; Last 7 days</button>
   <button id="smokeCheckBtn">&#127786; Smoke check</button>
   <button id="saveImageBtn">&#128247; Save image</button>
 </div>
@@ -449,6 +483,12 @@
     <!-- Only populated when Monte Carlo is on; hidden otherwise. -->
     <p id="addressProbabilityLine"></p>
   </div>
+</div>
+<div id="historyBar">
+  <button id="historyPlay" title="Play">&#9654;</button>
+  <input type="range" id="historyScrub" min="0" max="0" step="1" value="0" />
+  <span id="historyDate">Loading...</span>
+  <button id="historyClose" title="Back to live">&times;</button>
 </div>
 <div id="smokePanel">
   <div id="smokePanelHeader">
@@ -1627,6 +1667,9 @@ predictionStrengthSlider.addEventListener('change', () => {
 // only holds a coarse pre-clustered set) and renders only this country's
 // fires, replacing whatever was shown before.
 async function loadCountryFires(country) {
+  // Searching a country is a request for the live view of somewhere else,
+  // so history steps aside rather than having its day overwritten mid-play.
+  teardownHistory();
   inCountryView = true;
   statusEl.textContent = `Loading fires for ${country.name}...`;
   const bbox = [country.minLng, country.minLat, country.maxLng, country.maxLat].join(',');
@@ -2367,6 +2410,12 @@ async function updateFireCountEstimate(paramsStr) {
 }
 
 async function loadFires() {
+  // History owns the marker layer while it's open - a live refresh
+  // underneath it (a Detail level change, the small-fires toggle, a search
+  // being cleared) would silently replace the day being viewed with today's.
+  // exitHistory clears historyData before calling back in here, so leaving
+  // history still reloads normally.
+  if (historyActive()) return;
   const gridDeg = DETAIL_GRID_STEPS[+fireCountSlider.value];
   const minFrp = currentMinFrp();
   const minConfidence = currentMinConfidence();
@@ -2905,6 +2954,189 @@ addressInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') checkAddressRisk();
 });
 
+// --- Last 7 days playback ------------------------------------------------
+// The live map answers "what is burning now". This answers "which way has it
+// been going", which is the question a single snapshot structurally cannot:
+// one day of detections is a scatter of dots, but the same region played
+// day by day shows a fire front actually moving across the ground. It's also
+// the only part of this app that can be checked against reality rather than
+// forecast - it's all observation.
+//
+// Scoped to the region on screen rather than the whole world: a week of
+// worldwide detections is millions of rows, and the server refuses (well,
+// clips) anything oversized for exactly that reason.
+const HISTORY_DAYS = 7;
+const HISTORY_GRID_DEG = 0.15;
+const HISTORY_MS_PER_DAY = 1100; // playback speed, not real time
+// Kept deliberately tight. The slow part of this request is FIRMS generating
+// a week of CSV for the area, and it scales with area badly: a 35x35deg box
+// over the African fire belt measured at 68 seconds, versus 6 for a
+// country-sized one. A ~24deg span at typical country zoom keeps the wait
+// reasonable, and the server clips anything larger anyway.
+const HISTORY_MAX_HALF_SPAN_DEG = 20;
+const HISTORY_SPAN_PER_ALTITUDE = 40;
+
+const historyBar = document.getElementById('historyBar');
+const historyBtn = document.getElementById('historyBtn');
+const historyPlay = document.getElementById('historyPlay');
+const historyScrub = document.getElementById('historyScrub');
+const historyDate = document.getElementById('historyDate');
+const historyClose = document.getElementById('historyClose');
+
+let historyData = null;
+let historyTimer = null;
+let historyRequestId = 0;
+// What the map was showing before history took over the marker layer, so
+// closing puts the live view back exactly rather than re-fetching it.
+let historySnapshot = null;
+
+function historyActive() { return historyData !== null; }
+
+// The box the camera is actually looking at. Longitude is widened by
+// 1/cos(lat) so a high-latitude view covers the ground area it appears to,
+// rather than a much narrower strip.
+function currentViewBbox() {
+  const pov = world.pointOfView();
+  const halfLat = clamp(pov.altitude * HISTORY_SPAN_PER_ALTITUDE, 2, HISTORY_MAX_HALF_SPAN_DEG);
+  const halfLng = clamp(halfLat / Math.max(0.2, Math.cos((pov.lat * Math.PI) / 180)), 2, HISTORY_MAX_HALF_SPAN_DEG);
+  return {
+    west: clamp(pov.lng - halfLng, -180, 180),
+    south: clamp(pov.lat - halfLat, -90, 90),
+    east: clamp(pov.lng + halfLng, -180, 180),
+    north: clamp(pov.lat + halfLat, -90, 90),
+  };
+}
+
+function formatHistoryDate(iso) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function showHistoryDay(index) {
+  if (!historyData) return;
+  const day = historyData.days[index];
+  if (!day) return;
+  historyScrub.value = index;
+  historyDate.textContent = `${formatHistoryDate(day.date)} · ${day.raw_count.toLocaleString()}`;
+  renderPreClusteredMarkers(day.fires);
+}
+
+function setHistoryPlaying(playing) {
+  historyPlay.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
+  historyPlay.title = playing ? 'Pause' : 'Play';
+}
+
+function stopHistoryPlayback() {
+  if (historyTimer !== null) clearInterval(historyTimer);
+  historyTimer = null;
+  setHistoryPlaying(false);
+}
+
+function startHistoryPlayback() {
+  if (!historyData) return;
+  stopHistoryPlayback();
+  // Restart from the beginning if it's sitting at the end, so the button
+  // always does something visible rather than appearing dead.
+  if (+historyScrub.value >= historyData.days.length - 1) showHistoryDay(0);
+  setHistoryPlaying(true);
+  // setInterval, not requestAnimationFrame: this steps between discrete
+  // whole days rather than interpolating, so there's nothing to draw
+  // between steps, and rAF would just burn frames re-rendering the same day.
+  historyTimer = setInterval(() => {
+    const next = +historyScrub.value + 1;
+    if (next >= historyData.days.length) { stopHistoryPlayback(); return; }
+    showHistoryDay(next);
+  }, HISTORY_MS_PER_DAY);
+}
+
+// Tears history down WITHOUT restoring the previous markers - for when
+// something else (a country search) is about to render its own set anyway,
+// and putting the old world clusters back first would just be a flicker.
+function teardownHistory() {
+  stopHistoryPlayback();
+  historyRequestId++; // abandon any in-flight load
+  historyData = null;
+  historySnapshot = null;
+  historyBar.classList.remove('open');
+  historyBtn.classList.remove('active');
+}
+
+function exitHistory() {
+  const snapshot = historySnapshot;
+  teardownHistory();
+  if (snapshot) renderPreClusteredMarkers(snapshot);
+  statusEl.textContent = 'Back to live view';
+  // A country view's markers came from loadCountryFires, not loadFires, and
+  // the snapshot above already restored them.
+  if (!inCountryView) loadFires();
+}
+
+async function enterHistory() {
+  const requestId = ++historyRequestId;
+  closeFirePanel();
+  closeSmokePanel();
+  // A spread projection drawn from today's fires sitting on top of a
+  // five-day-old snapshot would be claiming something false, so predictions
+  // are cleared on the way in rather than left hanging over the animation.
+  clearPredictions();
+
+  historySnapshot = lastClusters;
+  historyBar.classList.add('open');
+  historyBtn.classList.add('active');
+  historyDate.textContent = 'Loading...';
+  setHistoryPlaying(false);
+  // Says "can take a moment" up front: this goes back to FIRMS for a week of
+  // data rather than being served from memory like the live map, and a
+  // dense region genuinely takes tens of seconds the first time.
+  statusEl.textContent = 'Loading the last 7 days (this can take a moment)...';
+
+  const b = currentViewBbox();
+  const bbox = `${b.west.toFixed(2)},${b.south.toFixed(2)},${b.east.toFixed(2)},${b.north.toFixed(2)}`;
+  try {
+    const res = await fetch(`/api/fires/history?bbox=${bbox}&days=${HISTORY_DAYS}&grid=${HISTORY_GRID_DEG}`);
+    const json = await res.json();
+    if (requestId !== historyRequestId) return; // closed, or restarted elsewhere
+    if (!res.ok) throw new Error(json.detail || 'Failed to load history');
+    if (!json.days.length) throw new Error('No detections in this area over the last week');
+
+    historyData = json;
+    historyScrub.max = json.days.length - 1;
+    historyScrub.value = 0;
+    const span = `${formatHistoryDate(json.days[0].date)} - ${formatHistoryDate(json.days[json.days.length - 1].date)}`;
+    statusEl.textContent = json.clipped
+      // Said out loud rather than silently showing a smaller area than the
+      // one the user was looking at.
+      ? `Last ${json.days.length} days (${span}) - area trimmed to fit`
+      : `Last ${json.days.length} days (${span})`;
+    showHistoryDay(0);
+    startHistoryPlayback();
+  } catch (err) {
+    if (requestId !== historyRequestId) return;
+    historyDate.textContent = 'Unavailable';
+    statusEl.textContent = `Couldn't load history: ${err.message}`;
+    // Put the live markers back - the bar stays up showing why it failed,
+    // but the map underneath shouldn't be left blank or stale.
+    historyData = null;
+    if (historySnapshot) renderPreClusteredMarkers(historySnapshot);
+  }
+}
+
+historyBtn.addEventListener('click', () => {
+  if (historyBar.classList.contains('open')) exitHistory();
+  else enterHistory();
+});
+historyClose.addEventListener('click', exitHistory);
+historyPlay.addEventListener('click', () => {
+  if (historyTimer !== null) stopHistoryPlayback();
+  else startHistoryPlayback();
+});
+historyScrub.addEventListener('input', () => {
+  // Grabbing the scrubber means taking manual control, so playback stops
+  // instead of fighting the drag.
+  stopHistoryPlayback();
+  showHistoryDay(+historyScrub.value);
+});
+
 // --- Air quality --------------------------------------------------------
 // US EPA AQI categories. Used both for the address check's air-quality line
 // and to colour the smoke plume, so the same number always reads the same
@@ -3011,6 +3243,9 @@ function closeSmokePanel() {
 
 function openSmokePanel() {
   closeFirePanel(); // they share the same slot on screen
+  // The smoke forecast reads live fires and a live wind forecast, so running
+  // it against a five-day-old snapshot would mix two different moments.
+  if (historyActive()) exitHistory();
   smokePanel.classList.add('open');
   smokeCheckBtn.classList.add('active');
   smokeHint.textContent = 'Click anywhere on the globe to centre the area you want checked.';

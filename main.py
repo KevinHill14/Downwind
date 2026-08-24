@@ -25,7 +25,7 @@ import math
 import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -321,14 +321,21 @@ def _filter_bbox(fires: list[dict], west: float, south: float, east: float, nort
 LARGE_FIRE_MIN_FRP = 27.4
 
 
-def _cluster_fires(fires: list[dict], grid_deg: float) -> list[dict]:
+def _cluster_fires(fires: list[dict], grid_deg: float, large_fire_min_frp: float = LARGE_FIRE_MIN_FRP) -> list[dict]:
     """Groups fires within grid_deg of each other into one FRP-weighted
     centroid marker - same aggregation as static/index.html's clusterFires(),
     run here so a dense area's response is a few hundred/thousand aggregate
     points instead of tens of thousands of raw ones. Nothing is dropped,
-    unlike a top-N cap. Fires at or above LARGE_FIRE_MIN_FRP skip grouping."""
-    large_fires = [f for f in fires if f["frp"] >= LARGE_FIRE_MIN_FRP]
-    small_fires = [f for f in fires if f["frp"] < LARGE_FIRE_MIN_FRP]
+    unlike a top-N cap. Fires at or above large_fire_min_frp skip grouping.
+
+    That exemption is right for the live map - a major fire shouldn't be
+    visually diluted by small ones beside it - but it means the output size
+    is driven by however many intense detections there are, not by the grid.
+    The history endpoint passes infinity to disable it, because a week of a
+    continent is tens of thousands of above-threshold detections per day,
+    which is both unreadable at that zoom and megabytes of JSON."""
+    large_fires = [f for f in fires if f["frp"] >= large_fire_min_frp]
+    small_fires = [f for f in fires if f["frp"] < large_fire_min_frp]
 
     clusters = [
         {"lat": f["lat"], "lng": f["lng"], "count": 1, "totalFrp": f["frp"], "maxFrp": f["frp"]}
@@ -467,6 +474,251 @@ async def get_fires(
         return result
     finally:
         _FIRES_COMPUTE_SEMAPHORE.release()
+
+
+HISTORY_MAX_DAYS = 7
+# FIRMS' area endpoint takes a day range plus an optional start date. The
+# range is capped at 5 by the API itself ("Invalid day range. Expects [1..5]"
+# - confirmed by asking it for 7), and a start date makes the range run
+# FORWARD from that date, so a 7-day window is covered by two chunks rather
+# than one request. Every row carries its own acq_date, so the days are
+# separated here instead of paying a request per day.
+HISTORY_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{area}/{days}/{start}"
+HISTORY_MAX_DAYS_PER_REQUEST = 5
+
+
+def _history_chunks(days: int) -> list[tuple[str, int]]:
+    """The (start_date, day_count) pairs covering the last `days` days up to
+    and including today, none longer than the API allows and none
+    overlapping (so nothing is double counted when the days are regrouped)."""
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days - 1)
+    chunks = []
+    remaining = days
+    while remaining > 0:
+        span = min(HISTORY_MAX_DAYS_PER_REQUEST, remaining)
+        chunks.append((start.isoformat(), span))
+        start += timedelta(days=span)
+        remaining -= span
+    return chunks
+
+# A week of detections over a large area is a lot of rows, and this box has
+# 512MB total with the live world dataset already resident. Rather than
+# refusing an oversized request outright - which would mean no history at all
+# for exactly the countries that need it most, since Russia's bounding box
+# alone is ~40x360 degrees - the box is shrunk around its own centre and the
+# response says so, so the animation still works over the part being looked at.
+HISTORY_MAX_SPAN_DEG = 60.0
+
+# FIRMS is slow (seconds per request) and a week of data is far more
+# expensive to assemble than the live view, so results are cached. Keyed on
+# the exact request, and short-lived because the most recent day keeps
+# filling in as satellites pass over.
+#
+# Stores the GZIPPED RESPONSE BYTES, not the assembled Python payload, for
+# both of the reasons the world-view cache learned the hard way: holding the
+# decoded object for a continent-sized week (430,000 detections was measured
+# for Russia) pushed RSS to 543MB, past Render's 512MB ceiling; and a "cache
+# hit" that still has to re-encode and re-compress that object took 11
+# seconds, which is most of the cost the cache existed to avoid. Compressed
+# bytes are a few hundred KB and a hit is a straight write to the socket.
+HISTORY_CACHE_TTL_SECONDS = 30 * 60
+_HISTORY_CACHE_MAX_ENTRIES = 4
+_history_cache: "OrderedDict[tuple, dict]" = OrderedDict()  # key -> {"gzip": bytes, "fetched_at": float}
+
+# At a 60-degree span the camera is far enough back that sub-degree detail
+# isn't visible anyway, so an over-fine grid there spends megabytes of JSON
+# drawing dots on top of each other. Coarsens the clustering for large areas
+# only - a country-sized request is well under this and keeps what it asked for.
+HISTORY_MIN_CELLS_ACROSS = 150
+
+
+def _history_response(gzip_body: bytes, request: Request) -> Response:
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        return Response(content=gzip_body, media_type="application/json", headers={"Content-Encoding": "gzip"})
+    return Response(content=gzip.decompress(gzip_body), media_type="application/json")
+
+# Bounds concurrent history builds independently of the main fires
+# semaphore: these are by far the memory-heaviest thing this server does
+# (half a million parsed CSV rows for a continent-week), and a pile-up of
+# them is exactly the shape that caused an OOM restart before. Serialized to
+# one, because two continent-sized builds overlapping doubles the worst-case
+# transient footprint on a 512MB box - and this is a deliberate, occasional
+# click, not something every page load triggers.
+_HISTORY_SEMAPHORE = asyncio.Semaphore(1)
+
+
+def _clip_bbox_span(west: float, south: float, east: float, north: float):
+    """Shrinks an oversized box around its own centre, returning the box and
+    whether anything was actually clipped."""
+    clipped = False
+    if east - west > HISTORY_MAX_SPAN_DEG:
+        centre = (west + east) / 2
+        west, east = centre - HISTORY_MAX_SPAN_DEG / 2, centre + HISTORY_MAX_SPAN_DEG / 2
+        clipped = True
+    if north - south > HISTORY_MAX_SPAN_DEG:
+        centre = (south + north) / 2
+        south, north = centre - HISTORY_MAX_SPAN_DEG / 2, centre + HISTORY_MAX_SPAN_DEG / 2
+        clipped = True
+    return max(-180.0, west), max(-90.0, south), min(180.0, east), min(90.0, north), clipped
+
+
+async def _fetch_firms_history(area: str, source: str, days: int, start: str) -> list[Fire]:
+    url = HISTORY_URL.format(key=FIRMS_MAP_KEY, source=source, area=area, days=days, start=start)
+    resp = await _http_client.get(url, timeout=60)
+    resp.raise_for_status()
+
+    lines = resp.text.strip().splitlines()
+    if not lines:
+        return []
+    idx = {name: i for i, name in enumerate(lines[0].split(","))}
+
+    fires = []
+    for line in lines[1:]:
+        cols = line.split(",")
+        try:
+            fires.append(
+                Fire(
+                    lat=float(cols[idx["latitude"]]),
+                    lng=float(cols[idx["longitude"]]),
+                    confidence=cols[idx["confidence"]],
+                    frp=float(cols[idx["frp"]]),
+                    acq_date=cols[idx["acq_date"]],
+                    acq_time=cols[idx["acq_time"]],
+                )
+            )
+        except (ValueError, IndexError, KeyError):
+            continue
+    return fires
+
+
+def _round_history_clusters(clusters: list[dict]) -> list[dict]:
+    """Trims float precision in the clustered output. A cluster centroid is
+    serialized as ~17 significant digits by default, which is absurd for a
+    point that represents a grid cell tens of kilometres across - and across
+    a week of a dense region that alone was most of a multi-megabyte
+    response. 3 decimal places is ~110m, far finer than any grid used here,
+    so nothing visible is lost."""
+    for c in clusters:
+        c["lat"] = round(c["lat"], 3)
+        c["lng"] = round(c["lng"], 3)
+        c["totalFrp"] = round(c["totalFrp"], 1)
+        c["maxFrp"] = round(c["maxFrp"], 1)
+    return clusters
+
+
+def _group_history_by_day(fires: list[Fire], grid: float) -> list[dict]:
+    by_date: dict[str, list[Fire]] = {}
+    for f in fires:
+        by_date.setdefault(f.acq_date, []).append(f)
+    return [
+        # math.inf: cluster everything, including intense detections - see
+        # _cluster_fires. A history frame is about where activity WAS, and at
+        # a week/continent scale individual hotspots are neither legible nor
+        # affordable.
+        {
+            "date": date,
+            "fires": _round_history_clusters(_cluster_fires(day_fires, grid, math.inf)),
+            "raw_count": len(day_fires),
+        }
+        for date, day_fires in sorted(by_date.items())
+    ]
+
+
+@app.get("/api/fires/history")
+async def get_fires_history(
+    request: Request,
+    bbox: str = Query(..., description="west,south,east,north - required; a whole-world history is far too much data"),
+    days: int = Query(HISTORY_MAX_DAYS, ge=2, le=HISTORY_MAX_DAYS),
+    grid: float = Query(0.15, gt=0, description="clustering grid, applied per day"),
+):
+    """The last few days of detections in one region, split by day, so the
+    frontend can animate a fire season developing rather than only showing
+    the current snapshot. A single detection is a dot; a week of them played
+    in sequence is the direction a fire is actually moving.
+
+    Unlike /api/fires this is NOT served from the in-memory world dataset -
+    that only holds the most recent 2 days, which is what the live map needs.
+    This goes back to FIRMS for the longer window, which is why it's bbox-only
+    and cached."""
+    if not FIRMS_MAP_KEY:
+        raise HTTPException(status_code=500, detail="FIRMS_MAP_KEY environment variable is not set.")
+
+    parts = bbox.split(",")
+    if len(parts) != 4:
+        raise HTTPException(status_code=400, detail="bbox must be 'west,south,east,north'")
+    try:
+        west, south, east, north = (float(p) for p in parts)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox values must be numeric")
+    if not (-180 <= west <= 180 and -180 <= east <= 180 and -90 <= south <= 90 and -90 <= north <= 90):
+        raise HTTPException(status_code=400, detail="bbox is out of range")
+    if west >= east or south >= north:
+        raise HTTPException(status_code=400, detail="bbox must satisfy west<east and south<north")
+
+    west, south, east, north, clipped = _clip_bbox_span(west, south, east, north)
+    # Rounded before it becomes a cache key: the frontend derives this box
+    # from the live camera, so two views of the same place would otherwise
+    # differ in the sixth decimal and never share a cache entry.
+    area = ",".join(f"{v:.2f}" for v in (west, south, east, north))
+    grid = max(grid, max(east - west, north - south) / HISTORY_MIN_CELLS_ACROSS)
+    cache_key = (area, days, grid)
+
+    cached = _history_cache.get(cache_key)
+    if cached is not None and (time.time() - cached["fetched_at"]) < HISTORY_CACHE_TTL_SECONDS:
+        _history_cache.move_to_end(cache_key)
+        return _history_response(cached["gzip"], request)
+
+    try:
+        await asyncio.wait_for(_HISTORY_SEMAPHORE.acquire(), timeout=_FIRES_COMPUTE_WAIT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Server is busy right now - please try again in a moment.")
+    try:
+        results = await asyncio.gather(
+            *(
+                _fetch_firms_history(area, source, span, start)
+                for source in FIRMS_SOURCES
+                for start, span in _history_chunks(days)
+            ),
+            return_exceptions=True,
+        )
+        fires = []
+        for r in results:
+            if isinstance(r, Exception):
+                # One satellite (or one chunk of the window) failing still
+                # leaves a usable animation from the rest, which is much
+                # better than no history at all.
+                print(f"[history] one FIRMS request failed: {type(r).__name__}: {r}")
+                continue
+            fires.extend(r)
+
+        if not fires:
+            raise HTTPException(status_code=502, detail="No history available for this area right now.")
+
+        # Same reasoning as the live endpoint: grouping and clustering a week
+        # of detections is pure synchronous Python heavy enough to stall every
+        # other request on the event loop if run inline.
+        days_out = await asyncio.to_thread(_group_history_by_day, fires, grid)
+        payload = {
+            "days": days_out,
+            "bbox": {"west": west, "south": south, "east": east, "north": north},
+            "clipped": clipped,
+        }
+        # Encoded and compressed off the event loop too - for a week of a
+        # continent this is seconds of pure CPU, and doing it inline would
+        # stall every other request for that whole time.
+        gzip_body = await asyncio.to_thread(
+            lambda: gzip.compress(json.dumps(jsonable_encoder(payload)).encode("utf-8"), compresslevel=6)
+        )
+        # `payload` and `days_out` go out of scope here; only the compressed
+        # bytes are retained, which is what keeps this cache small.
+        _history_cache[cache_key] = {"gzip": gzip_body, "fetched_at": time.time()}
+        _history_cache.move_to_end(cache_key)
+        while len(_history_cache) > _HISTORY_CACHE_MAX_ENTRIES:
+            _history_cache.popitem(last=False)
+        return _history_response(gzip_body, request)
+    finally:
+        _HISTORY_SEMAPHORE.release()
 
 
 WIND_URL = "https://api.open-meteo.com/v1/forecast"
