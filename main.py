@@ -20,6 +20,7 @@ import asyncio
 import dataclasses
 import gzip
 import json
+from collections import OrderedDict
 import math
 import os
 import random
@@ -205,16 +206,23 @@ _world_fires: list[dict] = []
 # page load requests - takes real CPU: clustering, JSON-encoding, json.dumps,
 # and gzip compression, measured at ~2.6s combined for the full dataset.
 # Many people loading the map at once used to each redo all of that from
-# scratch; this caches BOTH the plain and pre-gzipped JSON bytes, so a
-# cache hit skips straight to sending a response - no re-clustering,
-# re-serializing, or re-compressing. (Storing the compressed variant too,
-# rather than relying on GZipMiddleware to compress the cached bytes fresh
-# each time, is what actually removes that per-request cost - middleware
-# has no way to know two different requests want the identical output.)
-# Cleared whenever _world_fires refreshes (see _refresh_world_fires), so
-# it's never more than one refresh cycle (10 min) stale - the same
-# staleness the raw data already has.
-_world_view_cache: dict[tuple, tuple[bytes, bytes]] = {}  # key -> (plain_json, gzipped_json)
+# scratch; this caches the rendered response so a hit skips straight to
+# sending bytes - no re-clustering, re-serializing, or re-compressing.
+# (Caching the compressed form, rather than relying on GZipMiddleware to
+# recompress fresh each time, is what actually removes that per-request
+# cost - middleware has no way to know two requests want identical output.)
+#
+# ONLY the gzipped bytes are kept, and only a handful of entries. The first
+# version stored the plain copy alongside the compressed one and had no
+# entry limit, which caused an out-of-memory restart in production: the UI
+# can produce 28 distinct keys (7 detail levels x 2 filter toggles x 2), and
+# holding a full uncompressed world response for each measured at +90MB on a
+# local dataset - several times that on the real one. Compressed-only is
+# ~4-5x smaller, and the cap bounds it regardless of how many combinations
+# get browsed between refreshes. Also cleared whenever _world_fires
+# refreshes (see _refresh_world_fires), so it's never staler than the data.
+_WORLD_VIEW_CACHE_MAX_ENTRIES = 8
+_world_view_cache: "OrderedDict[tuple, bytes]" = OrderedDict()  # key -> gzipped json
 
 
 # ~0.15deg (~15-17km) - a VIIRS pixel this close to a ground-reported fire
@@ -390,10 +398,13 @@ async def get_fires(
     # to be worth caching the same way.
     cache_key = (grid, min_frp, min_confidence, min_hectares)
     if bbox is None and cache_key in _world_view_cache:
-        plain_body, gzip_body = _world_view_cache[cache_key]
+        gzip_body = _world_view_cache[cache_key]
+        _world_view_cache.move_to_end(cache_key)  # LRU: most recently used stays longest
         if "gzip" in request.headers.get("accept-encoding", ""):
             return Response(content=gzip_body, media_type="application/json", headers={"Content-Encoding": "gzip"})
-        return Response(content=plain_body, media_type="application/json")
+        # Every real browser accepts gzip, so this path is rare enough that
+        # decompressing beats keeping a second uncompressed copy in memory.
+        return Response(content=gzip.decompress(gzip_body), media_type="application/json")
 
     try:
         await asyncio.wait_for(_FIRES_COMPUTE_SEMAPHORE.acquire(), timeout=_FIRES_COMPUTE_WAIT_TIMEOUT_SECONDS)
@@ -449,7 +460,10 @@ async def get_fires(
             # response is still produced normally below (via `return result`),
             # so a cache miss behaves identically to before this cache existed.
             plain_body = json.dumps(jsonable_encoder(result)).encode("utf-8")
-            _world_view_cache[cache_key] = (plain_body, gzip.compress(plain_body, compresslevel=6))
+            _world_view_cache[cache_key] = gzip.compress(plain_body, compresslevel=6)
+            _world_view_cache.move_to_end(cache_key)
+            while len(_world_view_cache) > _WORLD_VIEW_CACHE_MAX_ENTRIES:
+                _world_view_cache.popitem(last=False)  # drop least recently used
         return result
     finally:
         _FIRES_COMPUTE_SEMAPHORE.release()

@@ -156,6 +156,7 @@ These aren't environment variables — they're constants in the code, listed her
 | `ELEVATION_CACHE_TTL_SECONDS` | 24 hr | How long a terrain reading is cached (terrain doesn't change, so this is long). |
 | `CACHE_EVICTION_INTERVAL_SECONDS` | 2 min | How often expired cache entries are actually swept out of memory. |
 | `MAX_BATCH_POINTS` | 1000 | Hard cap on points accepted in one wind/elevation/forecast request. |
+| `_WORLD_VIEW_CACHE_MAX_ENTRIES` | 8 | Max cached world-view responses (LRU). Bounds cache memory — an unbounded version of this cache caused an out-of-memory restart in production. |
 | `_OPEN_METEO_CONCURRENCY` | 1 | How many outbound weather API calls can be in flight at once, across every user. Deliberately fully serialized — see [Problems](#problems-we-ran-into-and-how-we-handled-them). |
 | `_FIRES_COMPUTE_SEMAPHORE` | 20 | How many `/api/fires` requests can be doing real filter/cluster work at once before new ones get a fast "busy, retry" response instead of queuing indefinitely. |
 | `LARGE_FIRE_MIN_FRP` | 27.4 MW | Fires at or above this intensity always render as their own marker, never grouped into a cluster. |
