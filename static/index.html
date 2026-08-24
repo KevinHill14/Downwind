@@ -18,7 +18,9 @@
     box-sizing: border-box;
     background: rgba(20,20,20,0.85); color: #eee; padding: 10px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 8px;
+    transition: transform 0.25s ease;
   }
+  #optimizePanel.collapsed { transform: translateX(calc(100% + 16px)); }
   #optimizePanel .switchRow { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
   #saveImageBtn {
     background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
@@ -88,23 +90,55 @@
   .rangeSlider:disabled { opacity: 0.4; cursor: not-allowed; }
   .rangeSlider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
 
-  #continentPanel {
+  /* Left column. Both panels flow in one stack, so the optional hotspot
+     list sits under the search panel without either needing to know how
+     tall the other is. */
+  #leftStack {
     position: absolute; left: 16px; top: 66px; z-index: 10;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+  }
+  #continentPanel {
+    position: relative;
     background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
-    /* Bounded so the panel can never grow into the prediction panel in the
-       bottom-left corner on a short window - it got noticeably taller once
-       the hotspot list was added above Quick Look. The default chrome
-       scrollbar is a wide opaque strip that reads as a bug against a
-       translucent dark panel, so it's slimmed to a faint overlay that only
-       shows up when there's actually something to scroll. */
-    max-height: calc(100vh - 190px); overflow-y: auto;
-    scrollbar-width: thin; scrollbar-color: #555 transparent;
+    transition: transform 0.25s ease;
   }
-  #continentPanel::-webkit-scrollbar { width: 6px; }
-  #continentPanel::-webkit-scrollbar-track { background: transparent; }
-  #continentPanel::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 3px; }
-  #continentPanel::-webkit-scrollbar-thumb:hover { background: #666; }
+  /* Slides left until only its tab is left poking out of the screen edge.
+     Sized off the panel's own width so it works whatever that turns out to
+     be, rather than a hardcoded offset that drifts as content changes. */
+  #continentPanel.collapsed { transform: translateX(calc(-100% - 16px)); }
+
+  /* The pull tabs. Anchored to the panel rather than the viewport so they
+     travel with it and stay attached at any panel width.
+     Selectors are panel-scoped deliberately: `#continentPanel button` sets a
+     12px padding and an orange hover, and beats a bare `.panelTab` rule on
+     specificity - which silently inflated the tab to 24px wide (pushing part
+     of it off screen when collapsed) and turned it orange on hover. */
+  #continentPanel button.panelTab, #optimizePanel button.panelTab {
+    position: absolute; top: 12px; z-index: 1;
+    width: 18px; height: 40px; padding: 0;
+    background: rgba(20,20,20,0.85); color: #999; border: none;
+    font-size: 15px; line-height: 40px; text-align: center; cursor: pointer;
+  }
+  #continentPanel button.panelTab:hover, #optimizePanel button.panelTab:hover {
+    color: #fff; background: rgba(45,45,45,0.95);
+  }
+  #continentTab { right: -18px; border-radius: 0 8px 8px 0; }
+  #optimizeTab { left: -18px; border-radius: 8px 0 0 8px; }
+
+  #hotspotPanel {
+    position: relative; display: none;
+    background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
+    border-radius: 8px; font-size: 13px; flex-direction: column; gap: 6px;
+    min-width: 208px; box-sizing: border-box;
+  }
+  #hotspotPanel.visible { display: flex; }
+  #hotspotPanel h2 { font-size: 11px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
+  #hotspotPanel button {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 7px 12px; text-align: left; font-size: 13px; cursor: pointer;
+  }
+  #hotspotPanel button:hover { background: #e25822; }
   #continentPanel h2 { font-size: 11px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
   #continentPanel button {
     background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
@@ -325,13 +359,26 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
 
+    /* Mobile already collapses these behind the two corner buttons, so the
+       desktop pull tabs would be a second, redundant way to do the same
+       thing - and there's no room at the screen edge for them anyway. */
+    .panelTab { display: none; }
+    #continentPanel.collapsed, #optimizePanel.collapsed { transform: none; }
+
+    #leftStack { top: 62px; left: 16px; max-width: calc(100vw - 32px); }
     #continentPanel, #optimizePanel {
       display: none; max-height: 65vh; overflow-y: auto;
-      top: 62px; max-width: calc(100vw - 32px);
+      max-width: calc(100vw - 32px);
     }
+    #optimizePanel { top: 62px; }
     #continentPanel.mobileOpen, #optimizePanel.mobileOpen { display: flex; }
-    #continentPanel { left: 16px; }
     #optimizePanel { right: 16px; }
+    /* The hotspot list rides with the search panel's open/closed state on
+       mobile rather than being independently pinned over the map. Driven by
+       a class on the stack (see syncLeftStackMobile) rather than a :has()
+       selector, so it doesn't depend on selector support. */
+    #hotspotPanel { max-width: calc(100vw - 32px); }
+    #leftStack:not(.mobileOpen) #hotspotPanel { display: none; }
 
     /* Search mode: tapping the search box collapses the continent-button
        list down to just the search box + results. */
@@ -388,6 +435,7 @@
 <button id="optimizeToggle" class="mobilePanelToggle" title="Display options">&#9881;</button>
 <div id="status">Loading fire data...</div>
 <div id="optimizePanel">
+  <button class="panelTab" id="optimizeTab" title="Hide this panel">&#8250;</button>
   <div class="switchRow">
     <span>Prediction</span>
     <label class="switch">
@@ -419,6 +467,13 @@
       <span class="slider"></span>
     </label>
   </div>
+  <div class="switchRow">
+    <span>Biggest fires list</span>
+    <label class="switch">
+      <input type="checkbox" id="hotspotToggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
   <div class="sliderRow">
     <div class="rowTop">
       <span>Prediction range</span>
@@ -444,11 +499,12 @@
   <button id="smokeCheckBtn">&#127786; Smoke check</button>
   <button id="saveImageBtn">&#128247; Save image</button>
 </div>
+<!-- The two left-hand panels stack vertically, so the optional hotspot list
+     sits under the search panel and pushes nothing around when it's off. -->
+<div id="leftStack">
 <div id="continentPanel">
+  <button class="panelTab" id="continentTab" title="Hide this panel">&#8249;</button>
   <div id="quickLookButtons">
-    <h2>Biggest fires right now</h2>
-    <div id="hotspotList"><p class="hotspotNote">Loading...</p></div>
-    <hr />
     <h2>Quick Look</h2>
     <button id="resetZoomBtn" data-lat="20" data-lng="0" data-alt="2.2">Reset Zoom</button>
     <hr />
@@ -466,6 +522,14 @@
     <button id="countrySearchClear" title="Clear search">&times;</button>
   </div>
   <div id="countryResults"></div>
+</div>
+<!-- Off by default (see the "Biggest fires list" switch): it's a nice entry
+     point, but it was the single biggest contributor to the left side
+     feeling crowded, and it isn't something you need on screen permanently. -->
+<div id="hotspotPanel">
+  <h2>Biggest fires right now</h2>
+  <div id="hotspotList"><p class="hotspotNote">Loading...</p></div>
+</div>
 </div>
 <div id="predictionPanel">
   <h3>Fire spread predictions</h3>
@@ -777,7 +841,13 @@ function clearMonteCarloFootprints() {
 // back to background. A single flat translucent shape would show where smoke
 // goes but say nothing about the thing people actually care about, which is
 // how bad it is when it gets there.
-const SMOKE_PLUME_ALTITUDE = 0.0075; // above the MC footprint, below the prediction paths
+// Above the fire markers (0.01), not below them. Smoke physically sits over
+// the fire producing it, and in the dense regions where this feature matters
+// most - an African savanna burning season puts thousands of markers on
+// screen at once - a plume drawn underneath was almost entirely hidden by
+// the very fires it belonged to. It stays translucent, so the markers still
+// read through it as smoke-obscured rather than being erased.
+const SMOKE_PLUME_ALTITUDE = 0.0115;
 const smokePlumeGeometry = new THREE.BufferGeometry();
 const smokePlumeMaterial = new THREE.MeshBasicMaterial({
   vertexColors: true, // RGBA - the colour attribute below is itemSize 4
@@ -786,6 +856,19 @@ const smokePlumeMaterial = new THREE.MeshBasicMaterial({
   side: THREE.DoubleSide,
 });
 const smokePlumeObject = new THREE.Mesh(smokePlumeGeometry, smokePlumeMaterial);
+
+// Direction chevrons laid along each plume's centreline. The filled shape
+// alone is ambiguous about which END is the fire - a plume drawn from a fire
+// looks identical to one drawn towards it - and these resolve that at a
+// glance. Pale, because they sit on top of the darkest part of the smoke.
+const smokeArrowGeometry = new THREE.BufferGeometry();
+const smokeArrowMaterial = new THREE.LineBasicMaterial({
+  color: 0xffe2b8,
+  transparent: true,
+  opacity: 0.75,
+  depthWrite: false,
+});
+const smokeArrowObject = new THREE.LineSegments(smokeArrowGeometry, smokeArrowMaterial);
 
 // The searched circle, so it's unambiguous which fires were included.
 const smokeRingGeometry = new THREE.BufferGeometry();
@@ -834,6 +917,24 @@ function updateSmokePlume(bands) {
   smokePlumeGeometry.computeBoundingSphere();
 }
 
+// Each entry is { lat, lng, headingDeg, sizeKm }. Drawn as an open chevron
+// (two strokes back from a tip) rather than a filled triangle, so it reads
+// as an arrowhead at any zoom without needing its own mesh.
+const SMOKE_ARROW_SWEEP_DEG = 148;
+function updateSmokeArrows(arrows) {
+  const verts = [];
+  arrows.forEach(({ lat, lng, headingDeg, sizeKm }) => {
+    const tip = world.getCoords(lat, lng, SMOKE_PLUME_ALTITUDE);
+    [headingDeg + SMOKE_ARROW_SWEEP_DEG, headingDeg - SMOKE_ARROW_SWEEP_DEG].forEach(bearing => {
+      const back = destinationPoint(lat, lng, bearing, sizeKm);
+      const b = world.getCoords(back.lat, back.lng, SMOKE_PLUME_ALTITUDE);
+      verts.push(tip.x, tip.y, tip.z, b.x, b.y, b.z);
+    });
+  });
+  smokeArrowGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+  smokeArrowGeometry.computeBoundingSphere();
+}
+
 const SMOKE_RING_SEGMENTS = 96;
 function updateSmokeRing(centre, radiusKm) {
   const verts = [];
@@ -863,8 +964,12 @@ const world = Globe()
   // Footprint first so it renders beneath the markers and paths it belongs to.
   .customLayerData([
     { obj: mcFootprintObject }, { obj: mcOutlineObject },
-    { obj: smokePlumeObject }, { obj: smokeRingObject },
-    { obj: fireSpritesObject }, { obj: homeMarkerObject },
+    { obj: fireSpritesObject },
+    // Smoke draws after the fire markers so it layers over them, and the
+    // home marker draws after the smoke so your own location is never the
+    // thing that gets obscured.
+    { obj: smokePlumeObject }, { obj: smokeArrowObject }, { obj: smokeRingObject },
+    { obj: homeMarkerObject },
   ])
   .customThreeObject(d => d.obj)
   .customThreeObjectUpdate(() => {})
@@ -2361,7 +2466,11 @@ world
   .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
   .showAtmosphere(true);
 
-document.querySelectorAll('#continentPanel button').forEach(btn => {
+// Scoped to the Quick Look block, not the whole panel. Every button in here
+// carries data-lat/lng/alt; the panel also contains the search-clear X and
+// the collapse tab, which have no coordinates and would fly the camera to
+// NaN if they were caught by this.
+document.querySelectorAll('#quickLookButtons button').forEach(btn => {
   btn.addEventListener('click', () => {
     // Reset Zoom is a full reset, not just a fly-to - clears the search box,
     // any active prediction, and the status text back to the world count,
@@ -2381,14 +2490,38 @@ document.querySelectorAll('#continentPanel button').forEach(btn => {
 // (toggle buttons are display:none there).
 const continentPanelEl = document.getElementById('continentPanel');
 const optimizePanelEl = document.getElementById('optimizePanel');
+const leftStackEl = document.getElementById('leftStack');
+// Mirrors the search panel's mobile open state onto the stack, so the
+// hotspot list below it hides and shows along with it instead of floating
+// over the map on its own.
+function syncLeftStackMobile() {
+  leftStackEl.classList.toggle('mobileOpen', continentPanelEl.classList.contains('mobileOpen'));
+}
 document.getElementById('continentToggle').addEventListener('click', () => {
   continentPanelEl.classList.toggle('mobileOpen');
   optimizePanelEl.classList.remove('mobileOpen');
+  syncLeftStackMobile();
 });
 document.getElementById('optimizeToggle').addEventListener('click', () => {
   optimizePanelEl.classList.toggle('mobileOpen');
   continentPanelEl.classList.remove('mobileOpen');
+  syncLeftStackMobile();
 });
+
+// Desktop pull tabs: slide a side panel off screen leaving only its tab, so
+// the globe can be seen without losing the way back. "Am I in danger?" has
+// no tab on purpose - it's the feature the whole app is for, and hiding it
+// behind an affordance people have to discover would bury it.
+function makePanelTab(tabId, panel, openArrow, closedArrow) {
+  const tab = document.getElementById(tabId);
+  tab.addEventListener('click', () => {
+    const collapsed = panel.classList.toggle('collapsed');
+    tab.innerHTML = collapsed ? closedArrow : openArrow;
+    tab.title = collapsed ? 'Show this panel' : 'Hide this panel';
+  });
+}
+makePanelTab('continentTab', continentPanelEl, '&#8249;', '&#8250;');
+makePanelTab('optimizeTab', optimizePanelEl, '&#8250;', '&#8249;');
 
 // Every fire worldwide is included, nothing capped by rank - the slider
 // only controls the server-side clustering grid coarseness (see
@@ -2495,6 +2628,8 @@ const HOTSPOT_MAX_PER_COUNTRY = 2;
 const HOTSPOT_REFRESH_MS = 10 * 60 * 1000;
 const HOTSPOT_FLY_ALTITUDE = 0.3;
 const hotspotList = document.getElementById('hotspotList');
+const hotspotPanel = document.getElementById('hotspotPanel');
+const hotspotToggle = document.getElementById('hotspotToggle');
 
 // The candidate pool, not the final five. Kept whole because the final
 // selection depends on country names (see HOTSPOT_MAX_PER_COUNTRY) and the
@@ -2598,7 +2733,11 @@ function renderHotspots() {
     // Open-Meteo calls they didn't ask for.
     btn.addEventListener('click', () => {
       flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: HOTSPOT_FLY_ALTITUDE }, 1200);
-      if (isMobile()) continentPanelEl.classList.remove('mobileOpen');
+      if (isMobile()) {
+        continentPanelEl.classList.remove('mobileOpen');
+        syncLeftStackMobile();
+      }
+      closeFirePanel();
     });
     hotspotList.appendChild(btn);
   });
@@ -2624,6 +2763,22 @@ async function loadHotspots() {
     if (!hotspotClusters) hotspotList.innerHTML = '<p class="hotspotNote">Couldn\'t load right now.</p>';
   }
 }
+
+// Loaded on demand rather than at startup. The panel is off by default now,
+// and fetching a list nobody has asked to see would be a request per page
+// load spent on nothing. Polling only runs while it's actually on screen.
+let hotspotRefreshTimer = null;
+function setHotspotPanelVisible(visible) {
+  hotspotPanel.classList.toggle('visible', visible);
+  if (visible) {
+    if (!hotspotClusters) loadHotspots();
+    if (hotspotRefreshTimer === null) hotspotRefreshTimer = setInterval(loadHotspots, HOTSPOT_REFRESH_MS);
+  } else if (hotspotRefreshTimer !== null) {
+    clearInterval(hotspotRefreshTimer);
+    hotspotRefreshTimer = null;
+  }
+}
+hotspotToggle.addEventListener('change', () => setHotspotPanelVisible(hotspotToggle.checked));
 
 // --- "Am I in danger?" address check ---
 const addressInput = document.getElementById('addressInput');
@@ -3192,11 +3347,14 @@ function pm25ToAqi(pm) {
 // makes it cheap: only the fires inside get looked at, so the whole thing is
 // four requests regardless of how much of the world is burning.
 const SMOKE_PLUME_HOURS = 24;
-// Only the strongest few clusters in the circle get a plume. Smoke from many
-// small neighbouring fires merges into one mass in reality anyway, so drawing
-// every one separately would cost API calls to produce visual noise.
-const SMOKE_MAX_SOURCES = 5;
-const SMOKE_SOURCE_GRID_DEG = 0.5; // ~55km - roughly one merged smoke source
+// Every distinct fire group in the circle gets its own plume, not just the
+// strongest few - overlapping plumes compound into a darker, wider mass,
+// which is what actually happens, and a single plume from the biggest fire
+// badly understated how much of the map is under smoke. Still capped, since
+// each source costs a point in the wind and air-quality lookups, but one
+// batch request comfortably covers this many.
+const SMOKE_MAX_SOURCES = 24;
+const SMOKE_SOURCE_GRID_DEG = 0.3; // ~33km - roughly one fire complex
 // Smoke is carried at close to the full wind speed, unlike a fire FRONT
 // (spreadDistanceKm uses a small fraction of it) - the fire is limited by
 // what it can burn through, an airborne particle isn't. Slightly under 1.0
@@ -3217,7 +3375,27 @@ const SMOKE_BACKGROUND_PM25 = 5; // clean-air baseline; subtracted before decayi
 // Below this the plume is indistinguishable from ordinary air, so it's drawn
 // fully transparent rather than as a faint band implying smoke that isn't there.
 const SMOKE_MIN_VISIBLE_AQI = 25;
-const SMOKE_MAX_ALPHA = 0.5;
+// Where the plume reaches its darkest and most opaque.
+const SMOKE_OPAQUE_AQI = 200;
+const SMOKE_MIN_ALPHA = 0.10;
+// Held below fully opaque on purpose: with many overlapping plumes the
+// densest core would otherwise become a solid mask and hide the fire markers
+// that are the reason to be looking there at all.
+const SMOKE_MAX_ALPHA = 0.55;
+// Drawn as smoke rather than as a colour-coded overlay: thin haze is a pale
+// grey, heavy smoke is near-black, which is what it looks like from above
+// and needs no legend lookup to understand. The earlier version painted the
+// plume in AQI category colours (green/yellow/orange/red), which put a
+// second, unrelated colour scale on a globe whose markers already mean
+// something by colour - the exact numbers live in the panel text instead.
+const SMOKE_THIN_RGB = [175, 170, 163];
+const SMOKE_THICK_RGB = [26, 23, 21];
+// How often a direction chevron is dropped along a plume, in hours of travel.
+const SMOKE_ARROW_EVERY_HOURS = 8;
+// Arrows go on the strongest plumes only. Every source getting them turned
+// the overlap into a thicket of chevrons that read as scribble - a handful
+// is enough to establish which way the whole mass is drifting.
+const SMOKE_ARROW_MAX_PLUMES = 6;
 
 const smokePanel = document.getElementById('smokePanel');
 const smokePanelClose = document.getElementById('smokePanelClose');
@@ -3238,6 +3416,7 @@ function clearSmoke() {
   smokeCentre = null;
   smokeRunId++; // any in-flight run's results are now stale
   updateSmokePlume([]);
+  updateSmokeArrows([]);
   updateSmokeRing(null, 0);
   smokeResult.innerHTML = '';
   smokeScale.classList.remove('visible');
@@ -3325,27 +3504,47 @@ function smokePm25At(sourcePm25, distanceKm) {
 // with distance. Alpha tracks how unhealthy the air is rather than just
 // fading with distance, so a plume that stays dangerous a long way out
 // stays visible, and one that dilutes quickly disappears quickly.
-function smokeBandFor(centreline, sourcePm25, sourceRadiusKm) {
+function smokeBandFor(centreline, sourcePm25, sourceRadiusKm, arrowsOut) {
   return centreline.map((p, i) => {
     const heading = p.bearing
       ?? (centreline[i + 1] ? bearingBetween(p.lat, p.lng, centreline[i + 1].lat, centreline[i + 1].lng) : 0);
     const halfWidthKm = sourceRadiusKm + SMOKE_HALF_ANGLE * p.distanceKm;
     const aqi = pm25ToAqi(smokePm25At(sourcePm25, p.distanceKm));
-    const visible = clamp((aqi - SMOKE_MIN_VISIBLE_AQI) / (150 - SMOKE_MIN_VISIBLE_AQI), 0, 1);
+    // One number drives both how dark and how opaque the smoke is, so
+    // thickening smoke reads as a single continuous change rather than two.
+    const density = clamp(
+      (aqi - SMOKE_MIN_VISIBLE_AQI) / (SMOKE_OPAQUE_AQI - SMOKE_MIN_VISIBLE_AQI), 0, 1);
+
+    if (arrowsOut && p.hours > 0 && p.hours % SMOKE_ARROW_EVERY_HOURS === 0 && density > 0.05) {
+      arrowsOut.push({
+        lat: p.lat, lng: p.lng, headingDeg: heading,
+        // Scaled off the local plume width so an arrow never overflows the
+        // band it's annotating.
+        sizeKm: clamp(halfWidthKm * 0.4, 4, 30),
+      });
+    }
+
     return {
       left: destinationPoint(p.lat, p.lng, heading - 90, halfWidthKm),
       right: destinationPoint(p.lat, p.lng, heading + 90, halfWidthKm),
-      color: aqiCategory(aqi).color,
-      alpha: visible * SMOKE_MAX_ALPHA,
+      color: SMOKE_THIN_RGB.map((c, k) => Math.round(lerp(c, SMOKE_THICK_RGB[k], density))),
+      alpha: lerp(SMOKE_MIN_ALPHA, SMOKE_MAX_ALPHA, density),
     };
   });
 }
 
+// Matches how the plume is actually drawn (pale thin haze -> near-black
+// heavy smoke), rather than the AQI category colours it used to use.
 function renderSmokeScale() {
+  const STEPS = 6;
+  const swatches = Array.from({ length: STEPS }, (_, i) => {
+    const density = i / (STEPS - 1);
+    const rgb = SMOKE_THIN_RGB.map((c, k) => Math.round(lerp(c, SMOKE_THICK_RGB[k], density)));
+    return `<span style="background: rgb(${rgb.join(',')})"></span>`;
+  }).join('');
   smokeScale.innerHTML =
-    '<div id="smokeScaleBar">' +
-    AQI_CATEGORIES.map(c => `<span style="background: rgb(${c.color.join(',')})"></span>`).join('') +
-    '</div><div id="smokeScaleLabels"><span>Good</span><span>Unhealthy</span><span>Hazardous</span></div>';
+    `<div id="smokeScaleBar">${swatches}</div>` +
+    '<div id="smokeScaleLabels"><span>Thin haze</span><span>Heavy smoke</span></div>';
   smokeScale.classList.add('visible');
 }
 
@@ -3391,6 +3590,7 @@ async function runSmokeAnalysis(centre) {
       f => haversineKm(centre.lat, centre.lng, f.lat, f.lng) <= radiusKm);
     if (inCircle.length === 0) {
       updateSmokePlume([]);
+      updateSmokeArrows([]);
       smokeResult.innerHTML =
         `<p>No active fire detections within ${radiusKm} km of this point.</p>` +
         '<p class="smokeCaveat">Try a larger radius, or a spot with visible fire markers.</p>';
@@ -3429,6 +3629,7 @@ async function runSmokeAnalysis(centre) {
     const bestMeasuredPm25 = measured.length ? Math.max(...measured.map(a => a.pm2_5)) : null;
 
     const bands = [];
+    const arrows = [];
     let strongest = null;
     sources.forEach((source, i) => {
       const steps = forecastJson.results?.[i]?.steps;
@@ -3436,16 +3637,22 @@ async function runSmokeAnalysis(centre) {
       const sourcePm25 = airResults[i]?.pm2_5 ?? bestMeasuredPm25;
       if (sourcePm25 == null) return; // nothing measured anywhere - see the endpoint's note on not inventing one
       const centreline = smokeCentreline(source, steps);
-      // The circle's own extent stands in for the initial plume width: a
-      // cluster of fires 30km across doesn't start as a point source.
-      const sourceRadiusKm = Math.max(5, Math.min(radiusKm * 0.25, 25));
-      bands.push(smokeBandFor(centreline, sourcePm25, sourceRadiusKm));
+      // A fire complex doesn't start as a point source, but with many plumes
+      // now drawn at once this is kept near the size of one cluster rather
+      // than a share of the whole circle - otherwise every plume started as
+      // wide as the search area and they merged into one shapeless blob
+      // instead of a set of streaks that happen to overlap.
+      const sourceRadiusKm = clamp(radiusKm * 0.04, 3, 10);
+      // `sources` is already sorted strongest-first, so this takes the top few.
+      const wantsArrows = i < SMOKE_ARROW_MAX_PLUMES ? arrows : null;
+      bands.push(smokeBandFor(centreline, sourcePm25, sourceRadiusKm, wantsArrows));
       if (!strongest || source.totalFrp > strongest.source.totalFrp) {
         strongest = { source, steps, centreline, sourcePm25 };
       }
     });
 
     updateSmokePlume(bands);
+    updateSmokeArrows(arrows);
 
     const totalFrp = sources.reduce((sum, s) => sum + s.totalFrp, 0);
     const lines = [
@@ -3503,6 +3710,7 @@ async function runSmokeAnalysis(centre) {
   } catch (err) {
     if (stale()) return;
     updateSmokePlume([]);
+    updateSmokeArrows([]);
     smokeResult.innerHTML = `<p>Couldn't check this area: ${err.message}</p>`;
   }
 }
@@ -3794,10 +4002,9 @@ saveImageBtn.addEventListener('click', saveCurrentView);
 loadFires().finally(() => {
   document.getElementById('loadingOverlay').style.display = 'none';
   initialFiresLoaded = true;
-  // After the main map, not alongside it - the world fire fetch is the slow
-  // part of startup and this shouldn't compete with it for the connection.
-  loadHotspots();
-  setInterval(loadHotspots, HOTSPOT_REFRESH_MS);
+  // Only if the user has actually switched the list on - see
+  // setHotspotPanelVisible. Off by default, so normally this does nothing.
+  if (hotspotToggle.checked) setHotspotPanelVisible(true);
 });
 </script>
 </body>
