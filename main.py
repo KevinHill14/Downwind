@@ -32,7 +32,6 @@ from dotenv import load_dotenv
 
 load_dotenv()  # picks up FIRMS_MAP_KEY from a local .env file, so it survives server restarts
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
@@ -273,6 +272,56 @@ async def _refresh_world_fires() -> None:
     satellite_fires = _dedupe_against_ground(satellite_fires, ground_fires)
     _world_fires = satellite_fires + ground_fires
     _world_view_cache.clear()  # stale now that the underlying data changed
+    await _warm_world_view_cache()
+
+
+# What the frontend asks for on a first visit, with nothing touched: the
+# Detail level slider's default grid, "show small fires" off, "show minor
+# ground fires" on. Kept in sync with static/index.html - DETAIL_GRID_STEPS[3],
+# MIN_FRP_THRESHOLD, currentMinConfidence(), FIRE_ESTIMATE_GRID.
+_DEFAULT_VIEW_GRID = 0.5
+_DEFAULT_VIEW_MIN_FRP = 3.0
+_DEFAULT_VIEW_MIN_CONFIDENCE = "h"
+_ESTIMATE_GRID = 0.05
+
+
+async def _warm_world_view_cache() -> None:
+    """Builds the two responses a first-time visitor always requests, so the
+    first person through the door doesn't pay for them.
+
+    Everything about a cold world view is expensive - filtering 455,000
+    detections, clustering them, encoding and compressing the result - and
+    all of it was landing on whoever happened to arrive first after a data
+    refresh, measured at 29 seconds while the map sat on a loading screen.
+    None of that work depends on the request, so it's done here on the
+    refresh timer instead, off the request path entirely. A visitor arriving
+    afterwards gets a cache hit measured in milliseconds.
+
+    Only these two entries are warmed. Every other combination of the
+    filter switches is a deliberate action by someone already looking at a
+    working map, who can afford to wait a moment for it."""
+    warm = [
+        # The map itself - this is what the loading screen is waiting on.
+        (_DEFAULT_VIEW_GRID, False),
+        # The "~N active fires worldwide" headline, which is a separate
+        # request at a much finer grid and used to be the more expensive of
+        # the two by a wide margin.
+        (_ESTIMATE_GRID, True),
+    ]
+    for grid, count_only in warm:
+        key = (grid, _DEFAULT_VIEW_MIN_FRP, _DEFAULT_VIEW_MIN_CONFIDENCE, None, count_only)
+        try:
+            body = await asyncio.to_thread(
+                _build_fires_payload, _world_fires, grid, _DEFAULT_VIEW_MIN_FRP, None, count_only)
+        except Exception as e:
+            # Warming is an optimisation, never a requirement - a failure
+            # here just means the next visitor builds it themselves.
+            print(f"[warm] failed to pre-build grid={grid} count_only={count_only}: {type(e).__name__}: {e}")
+            continue
+        _world_view_cache[key] = body
+        _world_view_cache.move_to_end(key)
+    while len(_world_view_cache) > _WORLD_VIEW_CACHE_MAX_ENTRIES:
+        _world_view_cache.popitem(last=False)
 
 
 async def _world_fires_refresh_loop() -> None:
@@ -371,6 +420,84 @@ _FIRES_COMPUTE_SEMAPHORE = asyncio.Semaphore(20)
 _FIRES_COMPUTE_WAIT_TIMEOUT_SECONDS = 15
 
 
+def _gzip_response(gzip_body: bytes, request: Request) -> Response:
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        return Response(content=gzip_body, media_type="application/json", headers={"Content-Encoding": "gzip"})
+    # Every real browser accepts gzip, so this path is rare enough that
+    # decompressing beats keeping a second uncompressed copy in memory.
+    return Response(content=gzip.decompress(gzip_body), media_type="application/json")
+
+
+def _fire_to_dict(f) -> dict:
+    return {
+        "lat": f.lat, "lng": f.lng, "confidence": f.confidence, "frp": f.frp,
+        "acq_date": f.acq_date, "acq_time": f.acq_time, "ha": f.ha,
+    }
+
+
+def _build_fires_payload(fires, grid, min_frp, min_hectares, count_only) -> bytes:
+    """Filter, cluster, encode and compress, in one blocking call.
+
+    Deliberately one function rather than steps spread through the request
+    handler, because the cache warmer (see _warm_world_view_cache) has to
+    produce byte-for-byte the same thing the handler would - if the two ever
+    drifted, the warmer would poison the cache with subtly different content
+    under a key the handler thinks it owns. Sharing the code makes that
+    impossible rather than merely unlikely.
+
+    min_confidence is accepted by the endpoint but not applied here - an
+    "h"-only floor dropped France from 300 detections to 1 ("h" confidence is
+    rare in VIIRS data generally). It stays in the cache key so the frontend
+    can keep sending it. Re-enable with a better-calibrated threshold.
+    """
+    if min_frp is not None:
+        # A flat intensity floor, not a top-N cap - a rank-based cap can
+        # bury a real regional fire under stronger fires elsewhere.
+        fires = [f for f in fires if f["frp"] >= min_frp]
+    if min_hectares is not None:
+        # Only affects ground-sourced fires (the only ones with "ha").
+        fires = [f for f in fires if f.get("ha") is None or f["ha"] >= min_hectares]
+
+    raw_count = len(fires)
+    if grid is not None:
+        # Aggregated, not truncated - every fire still contributes to a cluster.
+        fires = _cluster_fires(fires, grid)
+
+    # count_only skips the fire list entirely. The headline "~N active fires
+    # worldwide" figure needs the number and nothing else, but it used to
+    # serialize and compress all 86,000 clusters to deliver it - measured at
+    # 18 of the 22 seconds that request cost, and it runs concurrently with
+    # the map's own load, starving it of CPU. The clustering still happens
+    # (the count IS the cluster count), just not the encoding of a list
+    # nobody reads.
+    result = (
+        {"count": len(fires), "raw_count": raw_count}
+        if count_only
+        else {"fires": fires, "count": len(fires), "raw_count": raw_count}
+    )
+    # Encoded and compressed once, and that same buffer is both cached and
+    # returned. Previously a cache miss did this twice - by hand for the
+    # cache, then again by FastAPI and GZipMiddleware for the response - so
+    # the slowest path was paying double.
+    return gzip.compress(_encode_fires_payload(result), compresslevel=6)
+
+
+def _encode_fires_payload(result: dict) -> bytes:
+    """JSON bytes for a /api/fires response, without FastAPI's jsonable_encoder.
+
+    That encoder walks every value recursively to work out how to serialize
+    it, which is the right general-purpose behaviour and completely wasted
+    here: clustered output is already plain dicts of floats and ints, and
+    raw output is a list of one known dataclass. Measured on the real world
+    dataset, jsonable_encoder took 12.8s where a direct json.dumps took 3.3s
+    for the same payload - it was the single most expensive step in a cold
+    request, costing about 4x what the encoding actually requires."""
+    fires = result.get("fires")
+    if fires and isinstance(fires[0], Fire):
+        result = {**result, "fires": [_fire_to_dict(f) for f in fires]}
+    return json.dumps(result).encode("utf-8")
+
+
 @app.get("/api/fires")
 async def get_fires(
     request: Request,
@@ -391,6 +518,11 @@ async def get_fires(
         description="drop ground-sourced fires smaller than this many hectares - satellite detections "
         "(no hectare data) are unaffected either way",
     ),
+    count_only: bool = Query(
+        False,
+        description="return just the counts, skipping the fire list entirely - for the headline "
+        "'~N active fires worldwide' figure, which needs the number and nothing else",
+    ),
 ):
     if not FIRMS_MAP_KEY:
         raise HTTPException(
@@ -403,15 +535,21 @@ async def get_fires(
     # requesting the exact same default view is the common case worth
     # short-circuiting; a country search's bbox varies too much per user
     # to be worth caching the same way.
-    cache_key = (grid, min_frp, min_confidence, min_hectares)
+    # The refresh loop runs as a background task so a slow NASA response can
+    # never block startup (see _world_fires_refresh_loop), which means the
+    # very first visitors after a deploy or a cold start can arrive before
+    # any data exists. Answering those with a normal empty result would look
+    # identical to "the world is not on fire"; this says which it is, so the
+    # frontend can show that it's still coming and retry rather than
+    # rendering a convincingly empty globe.
+    if not _world_fires:
+        return {"fires": [], "count": 0, "raw_count": 0, "ready": False}
+
+    cache_key = (grid, min_frp, min_confidence, min_hectares, count_only)
     if bbox is None and cache_key in _world_view_cache:
         gzip_body = _world_view_cache[cache_key]
         _world_view_cache.move_to_end(cache_key)  # LRU: most recently used stays longest
-        if "gzip" in request.headers.get("accept-encoding", ""):
-            return Response(content=gzip_body, media_type="application/json", headers={"Content-Encoding": "gzip"})
-        # Every real browser accepts gzip, so this path is rare enough that
-        # decompressing beats keeping a second uncompressed copy in memory.
-        return Response(content=gzip.decompress(gzip_body), media_type="application/json")
+        return _gzip_response(gzip_body, request)
 
     try:
         await asyncio.wait_for(_FIRES_COMPUTE_SEMAPHORE.acquire(), timeout=_FIRES_COMPUTE_WAIT_TIMEOUT_SECONDS)
@@ -435,43 +573,20 @@ async def get_fires(
                 raise HTTPException(status_code=400, detail="bbox must satisfy west<east and south<north")
             fires = _filter_bbox(fires, west, south, east, north)
 
-        # min_confidence is accepted but currently ignored - an "h"-only floor
-        # dropped France from 300 detections to 1 ("h" confidence is rare in
-        # VIIRS data generally). Re-enable with a better-calibrated threshold.
-
-        if min_frp is not None:
-            # A flat intensity floor, not a top-N cap - a rank-based cap can
-            # bury a real regional fire under stronger fires elsewhere.
-            fires = [f for f in fires if f["frp"] >= min_frp]
-
-        if min_hectares is not None:
-            # Only affects ground-sourced fires (the only ones with "ha").
-            fires = [f for f in fires if f.get("ha") is None or f["ha"] >= min_hectares]
-
-        raw_count = len(fires)
-
-        if grid is not None:
-            # Aggregated, not truncated - every fire still contributes to a cluster.
-            # Off the event loop: this is pure synchronous Python over up to
-            # tens of thousands of fires, and running it inline was found
-            # (during a load-testing pass) to stall every OTHER concurrent
-            # request - even cheap cache hits and unrelated endpoints - for
-            # as long as clustering took, since nothing else on the single
-            # event loop could run meanwhile. to_thread lets the interpreter
-            # keep servicing other requests while this grinds through.
-            fires = await asyncio.to_thread(_cluster_fires, fires, grid)
-
-        result = {"fires": fires, "count": len(fires), "raw_count": raw_count}
+        # Everything from here is pure synchronous Python over hundreds of
+        # thousands of fires, so it all goes onto a worker thread together.
+        # Running any of it inline was found (during a load-testing pass) to
+        # stall every OTHER concurrent request - even cheap cache hits and
+        # unrelated endpoints - for as long as it took, since nothing else on
+        # the single event loop could run meanwhile.
+        gzip_body = await asyncio.to_thread(
+            _build_fires_payload, fires, grid, min_frp, min_hectares, count_only)
         if bbox is None:
-            # Rendered once here for future cache hits; this request's own
-            # response is still produced normally below (via `return result`),
-            # so a cache miss behaves identically to before this cache existed.
-            plain_body = json.dumps(jsonable_encoder(result)).encode("utf-8")
-            _world_view_cache[cache_key] = gzip.compress(plain_body, compresslevel=6)
+            _world_view_cache[cache_key] = gzip_body
             _world_view_cache.move_to_end(cache_key)
             while len(_world_view_cache) > _WORLD_VIEW_CACHE_MAX_ENTRIES:
                 _world_view_cache.popitem(last=False)  # drop least recently used
-        return result
+        return _gzip_response(gzip_body, request)
     finally:
         _FIRES_COMPUTE_SEMAPHORE.release()
 
@@ -707,8 +822,11 @@ async def get_fires_history(
         # Encoded and compressed off the event loop too - for a week of a
         # continent this is seconds of pure CPU, and doing it inline would
         # stall every other request for that whole time.
+        # Plain dicts of primitives by this point, so jsonable_encoder's
+        # recursive type walk is pure overhead here too - it measured ~4x the
+        # cost of a direct dumps on the fires endpoint.
         gzip_body = await asyncio.to_thread(
-            lambda: gzip.compress(json.dumps(jsonable_encoder(payload)).encode("utf-8"), compresslevel=6)
+            lambda: gzip.compress(json.dumps(payload).encode("utf-8"), compresslevel=6)
         )
         # `payload` and `days_out` go out of scope here; only the compressed
         # bytes are retained, which is what keeps this cache small.

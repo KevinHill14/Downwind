@@ -89,6 +89,13 @@ Type-ahead country search flies the camera to the country and loads only fires i
 - **Show small fires** (off by default) — otherwise low-intensity/low-confidence detections are hidden to cut down on visual noise for a world-scale view.
 - **Show minor ground fires** (on by default) — Canada's ground-confirmed fires can be filtered by hectares burned, independent of the satellite FRP filter above.
 
+### Loading behaviour
+The globe is handed over as soon as it exists rather than being held behind a loading screen. The map can be panned and zoomed immediately; only the controls that genuinely need world fire data (search, smoke check, history, the address check) dim until it lands, so a slow fetch reads as *"this part isn't ready yet"* rather than *"the site is broken"*.
+
+The two responses a first-time visitor always requests are pre-built on the data refresh timer, so nobody pays to construct them. Cold load of the default view went from **29.4s to 0.39s** — see [Problems](#problems-we-ran-into-and-how-we-handled-them).
+
+If the server is still doing its own first fetch from NASA (a fresh deploy, or free-tier instance waking up), `/api/fires` says so explicitly and the page waits it out — rather than drawing an empty globe that looks exactly like a world with no fires on it.
+
 ### Mobile support
 Responsive layout below 820px width: search and settings collapse into icon-triggered overlay panels, the prediction/address panels share one screen slot instead of competing for space, and sliders/touch targets resize for a touch screen.
 
@@ -181,6 +188,7 @@ These aren't environment variables — they're constants in the code, listed her
 | `CACHE_EVICTION_INTERVAL_SECONDS` | 2 min | How often expired cache entries are actually swept out of memory. |
 | `MAX_BATCH_POINTS` | 1000 | Hard cap on points accepted in one wind/elevation/forecast request. |
 | `_WORLD_VIEW_CACHE_MAX_ENTRIES` | 8 | Max cached world-view responses (LRU). Bounds cache memory — an unbounded version of this cache caused an out-of-memory restart in production. |
+| `_DEFAULT_VIEW_GRID` / `_DEFAULT_VIEW_MIN_FRP` / `_ESTIMATE_GRID` | 0.5 / 3.0 / 0.05 | The exact request a first-time visitor makes. These two responses are pre-built on every data refresh so nobody pays to construct them — keep in sync with the frontend defaults. |
 | `_OPEN_METEO_CONCURRENCY` | 1 | How many outbound weather API calls can be in flight at once, across every user. Deliberately fully serialized — see [Problems](#problems-we-ran-into-and-how-we-handled-them). |
 | `_FIRES_COMPUTE_SEMAPHORE` | 20 | How many `/api/fires` requests can be doing real filter/cluster work at once before new ones get a fast "busy, retry" response instead of queuing indefinitely. |
 | `LARGE_FIRE_MIN_FRP` | 27.4 MW | Fires at or above this intensity always render as their own marker, never grouped into a cluster. The history endpoint deliberately overrides this to cluster everything — see [Problems](#problems-we-ran-into-and-how-we-handled-them). |
@@ -230,7 +238,7 @@ All endpoints are JSON. None require auth from the browser (the backend holds th
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/fires` | GET | Fire data. `bbox`, `grid`, `min_frp`, `min_confidence`, `min_hectares` query params filter/cluster it. |
+| `/api/fires` | GET | Fire data. `bbox`, `grid`, `min_frp`, `min_confidence`, `min_hectares` query params filter/cluster it. `count_only=1` returns just the counts, skipping the fire list. Returns `ready: false` if the server hasn't finished its first fetch from NASA yet. |
 | `/api/fires/history` | GET | The last `days` (2–7) of detections in a region, split by day, for the playback animation. `bbox` is required — a whole-world week is far too much data. Oversized boxes are clipped around their centre, and the response says so. |
 | `/api/air-quality/batch` | POST | Ground-level PM2.5 and US AQI for a list of points. Returns nulls, never estimates, where no measurement is available. |
 | `/api/wind/batch` | POST | Current wind for a list of `{lat, lng}` points. |
@@ -249,7 +257,9 @@ All endpoints are JSON. None require auth from the browser (the backend holds th
 - **Caching the fully-rendered output, not just the raw data, matters.** Caching a Python object still leaves you re-serializing and re-compressing it on every request; caching the actual response bytes (including the pre-gzipped variant) is what actually removes that repeated cost.
 - **The Earth is round and your maths probably isn't.** Longitude wraps at ±180°, and any geometry that treats it as a flat number line silently produces wrong answers rather than errors — for us, half of Siberia registered as being in no country at all, and the country search for Russia returned nothing, for weeks, without a single exception being thrown. Worse, the obvious fix made *more* things wrong in ways we'd never have noticed without a broad sweep. Wrap-around bugs don't announce themselves.
 - **Ask the API instead of guessing at it.** Two assumptions about NASA's history endpoint (that it accepts a 10-day range, and how a start date interacts with that range) were both settled in under a minute by sending it one request each. Both would have been silent, plausible-looking data bugs if we'd guessed — the first was wrong, the second wasn't.
-- **Check the instrument before optimising against it.** A "cache hit" that looked like it took 5.7 seconds turned out to be the *measuring tool's* overhead; the actual request was 30 ms. We nearly optimised a problem that didn't exist.
+- **Check the instrument before optimising against it.** A "cache hit" that looked like it took 5.7 seconds turned out to be the *measuring tool's* overhead; the actual request was 30 ms. We nearly optimised a problem that didn't exist — and then made the same mistake twice more before learning to reach for a raw HTTP client first.
+- **Profile before optimising, because the bottleneck is rarely the interesting code.** Everyone's instinct for "why is clustering 455,000 fires slow" is the clustering. It was 10% of the time. The real costs were a generic serializer doing unnecessary work, and an entire expensive request that existed to display a single number. Measuring took ten minutes and pointed somewhere none of us would have guessed.
+- **The fastest work is the work you don't do on the request path.** The biggest single win here wasn't making anything faster — it was noticing that the expensive result doesn't depend on the request at all, and building it on a timer instead so nobody waits for it.
 - **The same rule can be right in one context and wrong in another.** Never grouping intense fires into clusters is correct for the live map and actively harmful for a week-long animation. A constant that encodes a judgement call should be a parameter, not a hardcoded assumption baked into a shared function.
 - **Geospatial deduplication and clustering are both just "put things in grid cells" in disguise** — nearest-neighbor-ish problems that look like they need something fancy usually don't; rounding a coordinate to a grid cell key gets you 90% of the way there for a fraction of the complexity of a real spatial index.
 
@@ -284,6 +294,27 @@ The prediction feature depends on a free third-party weather API, and getting it
    → Added a two-level fallback: a point whose weather data couldn't be fetched now borrows the nearest point's real reading that *did* succeed; if literally nothing in the whole request succeeded, it falls back to a plausible synthetic default. A prediction now always returns a marker for every point, regardless of the weather API's availability — it just occasionally trades exact precision for an approximation instead of failing visibly.
 
 The broader lesson from this whole chain: the first few fixes were all real improvements, but each was solving one layer of a problem that had another layer underneath it, discoverable only by testing against real production logs rather than local conditions (a personal, non-shared IP never reproduced the underlying issue at all).
+
+### A 29-second first load, and where it actually went
+The default world view took **29.4 seconds** to build on a cold cache. Rather than guess, we timed every stage of the request (`profile_load.py`, still in the repo). The result was not what any of us would have picked:
+
+| Stage | Display request | Count request |
+|---|---|---|
+| filter 455k detections | 0.6s | 0.2s |
+| cluster | 2.9s | 3.6s |
+| **`jsonable_encoder`** | **2.4s** | **12.8s** |
+| `json.dumps` | 0.5s | 2.9s |
+| gzip | 0.3s | 2.6s |
+
+Three separate problems, none of them the clustering everyone assumes is the bottleneck:
+
+- **The most expensive request existed to display one number.** The "~96,594 active fires worldwide" line was fetching the entire clustered fire list — 7.7 MB, 86,000 clusters — to read `.count` off it and throw the rest away. Worse, it runs *concurrently* with the map's own load, so it wasn't just slow itself, it was starving the request the user was actually waiting on. A `count_only` flag skips building and serializing the list entirely: **22s → 0.03s**.
+- **FastAPI's `jsonable_encoder` was the single most expensive step.** It recursively walks every value to work out how to serialize it — correct in general, and completely wasted on data that's already plain dicts of floats. Direct `json.dumps` does the same job for a quarter of the cost.
+- **A cache miss did all the work twice** — once by hand to fill the cache, then again through FastAPI and GZipMiddleware to build the response. The slowest path was paying double. It now encodes once and returns that same buffer.
+
+Then the actual fix: **none of this work depends on the request**, so the two responses every first-time visitor asks for are now pre-built on the refresh timer, off the request path. Combined: **29.4s → 0.39s**, and the page is interactive in under a second.
+
+For the third time in this project, a "slow" measurement turned out to be the measuring tool — PowerShell's `Invoke-WebRequest` was adding ~70 seconds handling a 7 MB response body. Timed with a raw HTTP client the same request was under a second. We have started defaulting to the raw client.
 
 ### Half of Siberia didn't exist
 Building the "Biggest fires right now" panel surfaced a bug that had been quietly live the whole time. The panel labels each hotspot by country, and the largest fires on Earth kept coming back as raw coordinates instead of "Russia".

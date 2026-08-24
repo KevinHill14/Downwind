@@ -334,6 +334,21 @@
     100% { transform: translateX(350%); }
   }
 
+  /* Controls that can't do anything useful until the world fire data has
+     arrived. Rather than holding the whole page behind a blocking overlay,
+     the globe comes up straight away and only these dim out - so panning,
+     zooming and reading the map all work during the wait, and it's obvious
+     which specific things aren't ready yet rather than the app just looking
+     broken. Cleared by setFireDataReady(). */
+  body.awaitingFires .needsFireData {
+    opacity: 0.4; pointer-events: none; filter: saturate(0.4);
+  }
+  .needsFireData { transition: opacity 0.25s ease, filter 0.25s ease; }
+  /* A quiet pulse on the status readout, so "still working" is visible
+     without a spinner sitting on top of the map. */
+  body.awaitingFires #status { animation: statusPulse 1.6s ease-in-out infinite; }
+  @keyframes statusPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
   /* Mobile-only Quick Look / Optimize toggle buttons; hidden on desktop. */
   .mobilePanelToggle { display: none; }
 
@@ -467,7 +482,7 @@
       <span class="slider"></span>
     </label>
   </div>
-  <div class="switchRow">
+  <div class="switchRow needsFireData">
     <span>Biggest fires list</span>
     <label class="switch">
       <input type="checkbox" id="hotspotToggle" />
@@ -495,8 +510,8 @@
     </div>
     <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="3" />
   </div>
-  <button id="historyBtn">&#128336; Last 7 days</button>
-  <button id="smokeCheckBtn">&#127786; Smoke check</button>
+  <button id="historyBtn" class="needsFireData">&#128336; Last 7 days</button>
+  <button id="smokeCheckBtn" class="needsFireData">&#127786; Smoke check</button>
   <button id="saveImageBtn">&#128247; Save image</button>
 </div>
 <!-- The two left-hand panels stack vertically, so the optional hotspot list
@@ -517,7 +532,7 @@
     <button data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
     <hr />
   </div>
-  <div id="countrySearchWrap">
+  <div id="countrySearchWrap" class="needsFireData">
     <input type="text" id="countrySearch" placeholder="Search country..." autocomplete="off" />
     <button id="countrySearchClear" title="Clear search">&times;</button>
   </div>
@@ -539,11 +554,11 @@
 </div>
 <div id="addressPanel">
   <h3>Am I in danger?</h3>
-  <div id="addressInputWrap">
+  <div id="addressInputWrap" class="needsFireData">
     <input type="text" id="addressInput" placeholder="Enter an address or place..." autocomplete="off" />
     <button id="addressInputClear" title="Clear">&times;</button>
   </div>
-  <button id="addressCheckBtn">Check</button>
+  <button id="addressCheckBtn" class="needsFireData">Check</button>
   <div id="addressResult">
     <span id="addressRiskBadge"></span>
     <p id="addressLocationLine"></p>
@@ -2541,7 +2556,10 @@ let fireEstimateRequestId = 0;
 async function updateFireCountEstimate(paramsStr) {
   const requestId = ++fireEstimateRequestId;
   try {
-    const res = await fetch(`/api/fires?grid=${FIRE_ESTIMATE_GRID}${paramsStr}`);
+    // count_only: this line needs one number, and asking for the fire list
+    // too meant the server serialized ~86,000 clusters nobody would read -
+    // which ran concurrently with the map's own load and starved it of CPU.
+    const res = await fetch(`/api/fires?grid=${FIRE_ESTIMATE_GRID}&count_only=1${paramsStr}`);
     const json = await res.json();
     if (!res.ok || requestId !== fireEstimateRequestId) return;
     statusEl.textContent = `~${json.count.toLocaleString()} active fires worldwide`;
@@ -2550,6 +2568,22 @@ async function updateFireCountEstimate(paramsStr) {
   }
 }
 
+// The globe is up and interactive from the first frame; these are the
+// controls that need world fire data behind them, and they stay dimmed
+// until it arrives (see .needsFireData in the CSS).
+function setFireDataReady(ready) {
+  document.body.classList.toggle('awaitingFires', !ready);
+  initialFiresLoaded = initialFiresLoaded || ready;
+}
+
+// The server fetches the world dataset in the background rather than during
+// startup, so on a cold start (a fresh deploy, or a free-tier instance
+// spinning back up) the first requests legitimately have nothing to serve
+// yet. It says so explicitly; this waits it out instead of drawing an empty
+// globe that looks exactly like a world with no fires on it.
+const FIRE_DATA_RETRY_MS = 4000;
+let fireDataRetryTimer = null;
+
 async function loadFires() {
   // History owns the marker layer while it's open - a live refresh
   // underneath it (a Detail level change, the small-fires toggle, a search
@@ -2557,6 +2591,7 @@ async function loadFires() {
   // exitHistory clears historyData before calling back in here, so leaving
   // history still reloads normally.
   if (historyActive()) return;
+  if (fireDataRetryTimer !== null) { clearTimeout(fireDataRetryTimer); fireDataRetryTimer = null; }
   const gridDeg = DETAIL_GRID_STEPS[+fireCountSlider.value];
   const minFrp = currentMinFrp();
   const minConfidence = currentMinConfidence();
@@ -2567,12 +2602,22 @@ async function loadFires() {
   const filterParams = minFrpParam + minConfidenceParam + minHectaresParam;
 
   statusEl.textContent = 'Loading fire data...';
-  updateFireCountEstimate(filterParams);
   try {
     const res = await fetch(`/api/fires?grid=${gridDeg}${filterParams}`);
     const json = await res.json();
     if (!res.ok) throw new Error(json.detail || 'Failed to load fires');
+    if (json.ready === false) {
+      // Server is up but still pulling the world dataset from NASA.
+      statusEl.textContent = 'Fire data is still loading on the server...';
+      fireDataRetryTimer = setTimeout(loadFires, FIRE_DATA_RETRY_MS);
+      return;
+    }
     renderPreClusteredMarkers(json.fires);
+    setFireDataReady(true);
+    // Only once there's actually data to count. Kicked off after the map
+    // rather than alongside it, so the two aren't competing for the server's
+    // single core while someone is staring at an empty globe.
+    updateFireCountEstimate(filterParams);
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
@@ -3999,9 +4044,21 @@ async function saveCurrentView() {
 
 saveImageBtn.addEventListener('click', saveCurrentView);
 
+// The globe is handed over as soon as it exists, rather than being held
+// behind a full-screen overlay until the world's fire data has arrived. The
+// map is worth looking at and can be panned and zoomed immediately; only the
+// controls that genuinely need that data are dimmed while it's on its way
+// (see .needsFireData), so a slow fetch reads as "this part isn't ready yet"
+// instead of "the site hasn't loaded".
+setFireDataReady(false);
+document.getElementById('loadingOverlay').style.display = 'none';
+
 loadFires().finally(() => {
-  document.getElementById('loadingOverlay').style.display = 'none';
+  // Country/ocean labels are independent of the fire data, so they're
+  // released even if the fire fetch is still retrying or failed outright -
+  // otherwise a bad fire fetch would leave the globe unlabelled too.
   initialFiresLoaded = true;
+  updateCountryLabels(world.pointOfView().altitude);
   // Only if the user has actually switched the list on - see
   // setHotspotPanelVisible. Off by default, so normally this does nothing.
   if (hotspotToggle.checked) setHotspotPanelVisible(true);
