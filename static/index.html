@@ -94,9 +94,17 @@
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
     /* Bounded so the panel can never grow into the prediction panel in the
        bottom-left corner on a short window - it got noticeably taller once
-       the hotspot list was added above Quick Look. */
+       the hotspot list was added above Quick Look. The default chrome
+       scrollbar is a wide opaque strip that reads as a bug against a
+       translucent dark panel, so it's slimmed to a faint overlay that only
+       shows up when there's actually something to scroll. */
     max-height: calc(100vh - 190px); overflow-y: auto;
+    scrollbar-width: thin; scrollbar-color: #555 transparent;
   }
+  #continentPanel::-webkit-scrollbar { width: 6px; }
+  #continentPanel::-webkit-scrollbar-track { background: transparent; }
+  #continentPanel::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 3px; }
+  #continentPanel::-webkit-scrollbar-thumb:hover { background: #666; }
   #continentPanel h2 { font-size: 11px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
   #continentPanel button {
     background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
