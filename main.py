@@ -636,6 +636,7 @@ async def _cache_eviction_loop() -> None:
         _evict_expired(_forecast_cache, FORECAST_CACHE_TTL_SECONDS, now)
         _evict_expired(_elevation_cache, ELEVATION_CACHE_TTL_SECONDS, now)
         _evict_expired(_current_wind_cache, FORECAST_CACHE_TTL_SECONDS, now)
+        _evict_expired(_air_quality_cache, AIR_QUALITY_CACHE_TTL_SECONDS, now)
 
 
 def _round_coord(v: float) -> float:
@@ -851,6 +852,87 @@ async def get_elevation_batch(points: list[WindPoint] = Body(..., max_length=MAX
         cached = _elevation_cache.get(key)
         if cached is not None:
             results.append({"lat": point.lat, "lng": point.lng, "elevation_m": cached["elevation_m"]})
+    return {"results": results}
+
+
+AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+# Air quality is published hourly, so a shorter TTL would only re-fetch an
+# identical reading. Longer than the wind TTL for the same reason.
+AIR_QUALITY_CACHE_TTL_SECONDS = 30 * 60
+_air_quality_cache: dict[str, dict] = {}  # "lat,lng" -> {"pm2_5", "us_aqi", "fetched_at"}
+
+
+@app.post("/api/air-quality/batch")
+async def get_air_quality_batch(points: list[WindPoint] = Body(..., max_length=MAX_BATCH_POINTS)):
+    """Ground-level PM2.5 and US AQI for many locations in one request.
+
+    Backs the smoke half of the risk picture. Fire proximity alone badly
+    understates who a wildfire actually affects: the overwhelming majority
+    of people harmed by one never see flame, they breathe the smoke, which
+    travels hundreds of kilometres downwind. Somebody 200km from the nearest
+    detection can be in genuinely hazardous air while every distance-based
+    check this app does says "safe".
+
+    Unlike the wind endpoints, this has NO synthetic fallback. A made-up
+    wind direction only misaims a drawing on a globe; a made-up air quality
+    number is a health figure someone might act on, and inventing one is
+    worse than admitting we don't know. Points we couldn't fetch come back
+    with nulls, and the frontend omits the line entirely rather than
+    guessing."""
+    if not points:
+        return {"results": []}
+
+    now = time.time()
+    uncached_points = [
+        p for p in points
+        if (cached := _air_quality_cache.get(f"{_round_coord(p.lat)},{_round_coord(p.lng)}")) is None
+        or (now - cached["fetched_at"]) >= AIR_QUALITY_CACHE_TTL_SECONDS
+    ]
+
+    # Same chunking rationale as /api/wind/batch: this is a GET API and a
+    # long comma-separated coordinate list runs into the URL length limit.
+    AIR_QUALITY_CHUNK_SIZE = 100
+    for i in range(0, len(uncached_points), AIR_QUALITY_CHUNK_SIZE):
+        chunk = uncached_points[i : i + AIR_QUALITY_CHUNK_SIZE]
+        params = {
+            "latitude": ",".join(str(p.lat) for p in chunk),
+            "longitude": ",".join(str(p.lng) for p in chunk),
+            "current": "pm2_5,us_aqi",
+        }
+        try:
+            # Shares _OPEN_METEO_CONCURRENCY via _get_with_retry even though
+            # it's a different Open-Meteo host: the rate limit that actually
+            # bites here is per-source-IP (see the notes on that semaphore),
+            # which is shared across all of their endpoints regardless.
+            resp = await _get_with_retry(AIR_QUALITY_URL, params, timeout=15)
+            data = resp.json()
+        except httpx.HTTPError as e:
+            print(f"[air-quality/batch] Open-Meteo request failed: {type(e).__name__}: {e}")
+            continue
+        if isinstance(data, dict):
+            data = [data]
+        for point, entry in zip(chunk, data):
+            try:
+                current = entry["current"]
+            except (KeyError, TypeError):
+                continue
+            _air_quality_cache[f"{_round_coord(point.lat)},{_round_coord(point.lng)}"] = {
+                "pm2_5": current.get("pm2_5"),
+                "us_aqi": current.get("us_aqi"),
+                "fetched_at": now,
+            }
+
+    results = []
+    for point in points:
+        cached = _air_quality_cache.get(f"{_round_coord(point.lat)},{_round_coord(point.lng)}")
+        results.append(
+            {
+                "lat": point.lat,
+                "lng": point.lng,
+                "pm2_5": cached["pm2_5"] if cached else None,
+                "us_aqi": cached["us_aqi"] if cached else None,
+            }
+        )
     return {"results": results}
 
 

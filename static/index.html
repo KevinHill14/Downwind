@@ -26,6 +26,12 @@
   }
   #saveImageBtn:hover { background: #555; }
   #saveImageBtn:disabled { opacity: 0.6; cursor: default; }
+  #smokeCheckBtn {
+    background: #2a2a2a; color: #eee; border: none; border-radius: 6px;
+    padding: 7px 12px; font-size: 12px; cursor: pointer; margin-top: 2px;
+  }
+  #smokeCheckBtn:hover { background: #555; }
+  #smokeCheckBtn.active { background: #3d5a66; }
   .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider {
@@ -59,6 +65,10 @@
     position: absolute; left: 16px; top: 66px; z-index: 10;
     background: rgba(20,20,20,0.85); color: #eee; padding: 12px 14px;
     border-radius: 8px; font-size: 13px; display: flex; flex-direction: column; gap: 6px;
+    /* Bounded so the panel can never grow into the prediction panel in the
+       bottom-left corner on a short window - it got noticeably taller once
+       the hotspot list was added above Quick Look. */
+    max-height: calc(100vh - 190px); overflow-y: auto;
   }
   #continentPanel h2 { font-size: 11px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; color: #999; }
   #continentPanel button {
@@ -70,6 +80,22 @@
   #resetZoomBtn:hover { background: #e25822; border-color: #e25822; }
 
   #continentPanel hr { width: 100%; border: none; border-top: 1px solid #444; margin: 4px 0; }
+
+  /* Leaderboard of the most intense fire regions on Earth right now. Its
+     rows are the same <button> shape as Quick Look's, so they inherit that
+     hover/click affordance, but carry a severity swatch and a second line. */
+  #hotspotList { display: flex; flex-direction: column; gap: 4px; }
+  #hotspotList button {
+    display: flex; align-items: center; gap: 8px; line-height: 1.3;
+    padding: 6px 10px;
+  }
+  .hotspotSwatch { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .hotspotText { display: flex; flex-direction: column; min-width: 0; }
+  .hotspotName { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hotspotStats { font-size: 10.5px; color: #999; }
+  /* Kept legible against the orange hover fill that #continentPanel button:hover paints. */
+  #hotspotList button:hover .hotspotStats { color: #ffe6d5; }
+  .hotspotNote { margin: 2px 0; font-size: 11.5px; color: #888; }
   /* Wrapped so mobile search-mode can collapse it as one animated block. */
   #quickLookButtons { display: flex; flex-direction: column; gap: 6px; }
   #countrySearchWrap { position: relative; display: flex; }
@@ -129,6 +155,43 @@
     border: 1px solid #444;
   }
   #firePanel.open { display: block; }
+  /* Shares firePanel's bottom-centre slot: inspecting one fire and analysing
+     a whole region are alternative things to be doing, never both at once,
+     so they're mutually exclusive rather than competing for the space. */
+  #smokePanel {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 12; background: rgba(20,20,20,0.94); color: #eee;
+    padding: 12px 16px; border-radius: 8px; font-size: 13px;
+    width: 340px; box-sizing: border-box; display: none;
+    border: 1px solid #444;
+  }
+  #smokePanel.open { display: block; }
+  #smokePanelHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #smokePanelTitle { font-weight: 600; flex: 1; }
+  #smokePanelClose {
+    background: none; border: none; color: #888; cursor: pointer;
+    font-size: 18px; line-height: 1; padding: 0 2px;
+  }
+  #smokePanelClose:hover { color: #fff; }
+  #smokeHint { margin: 0 0 8px; color: #9fd4e6; font-size: 12px; line-height: 1.4; }
+  #smokeResult { margin-top: 10px; font-size: 12px; line-height: 1.5; color: #ccc; }
+  #smokeResult .smokeHeadline { color: #eee; font-weight: 600; }
+  #smokeResult p { margin: 3px 0; }
+  #smokeResult .smokeCaveat { color: #888; font-size: 11px; margin-top: 6px; }
+  /* Reuses the address check's pill shape, but coloured from the AQI
+     category rather than the three-level fire risk scale. */
+  #smokeAqiBadge {
+    display: inline-block; padding: 3px 9px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 700; margin-bottom: 4px; color: #111;
+  }
+  /* Legend tying the plume's colour on the globe to what it means. */
+  #smokeScale { display: none; margin-top: 8px; }
+  #smokeScale.visible { display: block; }
+  #smokeScaleBar { display: flex; height: 7px; border-radius: 3px; overflow: hidden; }
+  #smokeScaleBar span { flex: 1; }
+  #smokeScaleLabels {
+    display: flex; justify-content: space-between; color: #888; font-size: 10px; margin-top: 3px;
+  }
   #firePanelHeader { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   #firePanelSwatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
   #firePanelTitle { font-weight: 600; flex: 1; }
@@ -169,6 +232,10 @@
   #addressRiskBadge.risk-safe { background: #2a5c2a; color: #a6e6a6; }
   #addressRiskBadge.risk-watch { background: #6b5a1e; color: #ffd97a; }
   #addressRiskBadge.risk-danger { background: #6b1e1e; color: #ff9a9a; }
+  .aqiDot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 6px; vertical-align: baseline;
+  }
 
   #disclaimerBar {
     position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); z-index: 9;
@@ -253,6 +320,11 @@
       transition: opacity 0.2s ease, transform 0.2s ease;
     }
     #addressPanel { bottom: 12px; }
+
+    #smokePanel {
+      left: 12px; right: 12px; bottom: 12px; width: auto; transform: none;
+      max-height: 60vh; overflow-y: auto;
+    }
     /* Predictions replace "Am I in danger?" in the same slot on mobile -
        no room for both. See setPredictionPanelVisible. */
     #addressPanel.hiddenMobile, #predictionPanel.hiddenMobile {
@@ -327,10 +399,14 @@
     </div>
     <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="3" />
   </div>
+  <button id="smokeCheckBtn">&#127786; Smoke check</button>
   <button id="saveImageBtn">&#128247; Save image</button>
 </div>
 <div id="continentPanel">
   <div id="quickLookButtons">
+    <h2>Biggest fires right now</h2>
+    <div id="hotspotList"><p class="hotspotNote">Loading...</p></div>
+    <hr />
     <h2>Quick Look</h2>
     <button id="resetZoomBtn" data-lat="20" data-lng="0" data-alt="2.2">Reset Zoom</button>
     <hr />
@@ -366,9 +442,29 @@
     <span id="addressRiskBadge"></span>
     <p id="addressLocationLine"></p>
     <p id="addressProximityLine"></p>
+    <!-- Smoke, not flame: someone can be far outside every fire radius above
+         and still be in genuinely bad air. Omitted entirely when the
+         measurement isn't available rather than guessed at. -->
+    <p id="addressAirLine"></p>
     <!-- Only populated when Monte Carlo is on; hidden otherwise. -->
     <p id="addressProbabilityLine"></p>
   </div>
+</div>
+<div id="smokePanel">
+  <div id="smokePanelHeader">
+    <span id="smokePanelTitle">Smoke check</span>
+    <button id="smokePanelClose" title="Close">&times;</button>
+  </div>
+  <p id="smokeHint">Click anywhere on the globe to centre the area you want checked.</p>
+  <div class="sliderRow">
+    <div class="rowTop">
+      <span>Search radius</span>
+      <span id="smokeRadiusLabel">200 km</span>
+    </div>
+    <input type="range" class="rangeSlider" id="smokeRadiusSlider" min="50" max="500" step="25" value="200" />
+  </div>
+  <div id="smokeResult"></div>
+  <div id="smokeScale"></div>
 </div>
 <div id="firePanel">
   <div id="firePanelHeader">
@@ -625,6 +721,91 @@ function clearMonteCarloFootprints() {
   updateMonteCarloFootprints([]);
 }
 
+// --- Smoke plume geometry -------------------------------------------------
+// The plume is one merged mesh (one draw call) whose colour AND opacity are
+// carried per-vertex rather than by the material, because the entire point
+// of drawing it is that it isn't uniform: it's dark and opaque where the air
+// is genuinely hazardous and fades to nothing where the smoke has diluted
+// back to background. A single flat translucent shape would show where smoke
+// goes but say nothing about the thing people actually care about, which is
+// how bad it is when it gets there.
+const SMOKE_PLUME_ALTITUDE = 0.0075; // above the MC footprint, below the prediction paths
+const smokePlumeGeometry = new THREE.BufferGeometry();
+const smokePlumeMaterial = new THREE.MeshBasicMaterial({
+  vertexColors: true, // RGBA - the colour attribute below is itemSize 4
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+const smokePlumeObject = new THREE.Mesh(smokePlumeGeometry, smokePlumeMaterial);
+
+// The searched circle, so it's unambiguous which fires were included.
+const smokeRingGeometry = new THREE.BufferGeometry();
+const smokeRingMaterial = new THREE.LineBasicMaterial({
+  color: 0xffffff,
+  transparent: true,
+  opacity: 0.35,
+  depthWrite: false,
+});
+const smokeRingObject = new THREE.LineSegments(smokeRingGeometry, smokeRingMaterial);
+
+// Each band is a list of cross-sections along one plume:
+// { left: {lat,lng}, right: {lat,lng}, color: [r,g,b], alpha: number }.
+// Consecutive cross-sections are joined into two triangles, so the mesh
+// follows the wind's curve instead of being a straight cone.
+function updateSmokePlume(bands) {
+  const positions = [];
+  const colors = [];
+
+  const push = (cross) => {
+    const l = world.getCoords(cross.left.lat, cross.left.lng, SMOKE_PLUME_ALTITUDE);
+    const r = world.getCoords(cross.right.lat, cross.right.lng, SMOKE_PLUME_ALTITUDE);
+    return { l, r, c: cross.color, a: cross.alpha };
+  };
+
+  bands.forEach(band => {
+    if (band.length < 2) return;
+    let prev = push(band[0]);
+    for (let i = 1; i < band.length; i++) {
+      const cur = push(band[i]);
+      // Two triangles per segment: (prevL, prevR, curR) and (prevL, curR, curL).
+      const quad = [
+        [prev.l, prev], [prev.r, prev], [cur.r, cur],
+        [prev.l, prev], [cur.r, cur], [cur.l, cur],
+      ];
+      quad.forEach(([v, src]) => {
+        positions.push(v.x, v.y, v.z);
+        colors.push(src.c[0] / 255, src.c[1] / 255, src.c[2] / 255, src.a);
+      });
+      prev = cur;
+    }
+  });
+
+  smokePlumeGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  smokePlumeGeometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 4));
+  smokePlumeGeometry.computeBoundingSphere();
+}
+
+const SMOKE_RING_SEGMENTS = 96;
+function updateSmokeRing(centre, radiusKm) {
+  const verts = [];
+  if (centre) {
+    // Walked as true great-circle bearings from the centre rather than a
+    // flat lat/lng circle, so the ring stays a real constant-distance circle
+    // near the poles instead of squashing into an ellipse.
+    const pts = [];
+    for (let i = 0; i <= SMOKE_RING_SEGMENTS; i++) {
+      const p = destinationPoint(centre.lat, centre.lng, (i / SMOKE_RING_SEGMENTS) * 360, radiusKm);
+      pts.push(world.getCoords(p.lat, p.lng, SMOKE_PLUME_ALTITUDE));
+    }
+    for (let i = 0; i < pts.length - 1; i++) {
+      verts.push(pts[i].x, pts[i].y, pts[i].z, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
+    }
+  }
+  smokeRingGeometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+  smokeRingGeometry.computeBoundingSphere();
+}
+
 const world = Globe()
   (document.getElementById('globeViz'))
   .pointOfView({ lat: 20, lng: 0, altitude: 2.2 })
@@ -634,6 +815,7 @@ const world = Globe()
   // Footprint first so it renders beneath the markers and paths it belongs to.
   .customLayerData([
     { obj: mcFootprintObject }, { obj: mcOutlineObject },
+    { obj: smokePlumeObject }, { obj: smokeRingObject },
     { obj: fireSpritesObject }, { obj: homeMarkerObject },
   ])
   .customThreeObject(d => d.obj)
@@ -979,17 +1161,101 @@ function boundsOf(feature) {
   };
 }
 
-// Standard even-odd ray-casting point-in-polygon test. `ring` is a GeoJSON
-// coordinate ring, [[lng,lat], ...].
-function pointInRing(lat, lng, ring) {
+// Bounds covering EVERY part of a country, unlike boundsOf above which
+// deliberately looks at the main landmass only. Used purely as a fast reject
+// ahead of the full point-in-polygon test. A country whose outline crosses
+// the antimeridian degenerates to the full -180..180 span here, which just
+// makes the reject a no-op for it rather than giving a wrong answer.
+function fullBoundsOf(feature) {
+  const geom = feature.geometry;
+  const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+  let minLat = 90;
+  let maxLat = -90;
+  let minLng = 180;
+  let maxLng = -180;
+  polygons.forEach(polygon => {
+    polygon[0].forEach(([lng, lat]) => {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    });
+  });
+  return { minLat, maxLat, minLng, maxLng };
+}
+
+// A ray-cast point-in-polygon test treats longitude as a flat axis, which
+// silently breaks for the two countries in this dataset whose outline
+// crosses the antimeridian (Russia and Fiji): their rings jump straight from
+// +180 to -180, so in flat lon/lat space the shape is torn in half and the
+// crossing count comes out wrong. The visible symptom was that every fire in
+// Siberia - some of the largest on Earth every summer - tested as being in
+// no country at all, so searching "Russia" returned almost nothing.
+//
+// Fixed by unwrapping each ring ONCE into a continuous longitude sequence:
+// walk the vertices and take the shorter way round at every step, so Russia
+// becomes a contiguous span of roughly 19..380 instead of two torn pieces.
+// The unwrapped form depends only on the ring, never on the query point, so
+// it's cached per ring - loadCountryFires runs this over thousands of fires
+// against the same geometry, and re-deriving it per fire would be far more
+// expensive than the original test was.
+//
+// (Unwrapping each vertex relative to the QUERY point instead - the obvious
+// one-liner - is worse than the bug: it tears apart any ring that happens to
+// sit more than 180 degrees away, which measured out as New Delhi resolving
+// to Mexico and open Pacific ocean resolving to Uganda.)
+const _unwrappedRings = new WeakMap();
+function unwrapRing(ring) {
+  let cached = _unwrappedRings.get(ring);
+  if (cached) return cached;
+  const xs = new Float64Array(ring.length);
+  const ys = new Float64Array(ring.length);
+  let x = ring[0][0];
+  xs[0] = x;
+  ys[0] = ring[0][1];
+  let minX = x;
+  let maxX = x;
+  for (let i = 1; i < ring.length; i++) {
+    let step = ring[i][0] - ring[i - 1][0];
+    step -= 360 * Math.round(step / 360); // shorter way round, never the 359-degree jump
+    x += step;
+    xs[i] = x;
+    ys[i] = ring[i][1];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+  }
+  cached = { xs, ys, minX, maxX };
+  _unwrappedRings.set(ring, cached);
+  return cached;
+}
+
+// Standard even-odd ray cast, over already-unwrapped coordinates.
+function castRay(lat, lng, xs, ys) {
   let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
+  for (let i = 0, j = xs.length - 1; i < xs.length; j = i++) {
+    const xi = xs[i];
+    const yi = ys[i];
+    const xj = xs[j];
+    const yj = ys[j];
     const intersects = yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
     if (intersects) inside = !inside;
   }
   return inside;
+}
+
+// `ring` is a GeoJSON coordinate ring, [[lng,lat], ...]. Once a ring is
+// unwrapped its span can sit outside the normal -180..180 range, so the
+// point is tested at each equivalent longitude that the span actually
+// reaches. For an ordinary country only one of the three is in range, so
+// this stays a single ray cast, exactly as before.
+function pointInRing(lat, lng, ring) {
+  const { xs, ys, minX, maxX } = unwrapRing(ring);
+  for (let turn = -1; turn <= 1; turn++) {
+    const shiftedLng = lng + turn * 360;
+    if (shiftedLng < minX || shiftedLng > maxX) continue;
+    if (castRay(lat, shiftedLng, xs, ys)) return true;
+  }
+  return false;
 }
 
 // Whether (lat, lng) falls inside a country's actual GeoJSON shape
@@ -1139,10 +1405,20 @@ async function loadCountryBorders() {
       maxLat: clamp(b.maxLat + pad, -90, 90),
       minLng: clamp(b.minLng - pad, -180, 180),
       maxLng: clamp(b.maxLng + pad, -180, 180),
+      // Separate from the four above, which cover only the MAIN landmass
+      // (that's what frames the camera correctly - see boundsOf). This one
+      // covers every part of a MultiPolygon, so it can be used as a cheap
+      // reject before the full geometry test without wrongly excluding
+      // outlying parts like Alaska or Hawaii.
+      fullBounds: fullBoundsOf(f),
       geometry: f.geometry,
     };
   });
   updateCountryLabels(world.pointOfView().altitude);
+  // The hotspot list may already be showing raw coordinates because it
+  // loaded before the borders did - now that COUNTRY_LIST is populated,
+  // those rows can be given real place names.
+  renderHotspots();
 }
 loadCountryBorders();
 
@@ -2128,6 +2404,170 @@ minorGroundFiresToggle.addEventListener('change', () => {
   loadFires();
 });
 
+// --- "Biggest fires right now" leaderboard --------------------------------
+// A globe of tens of thousands of markers gives someone opening this for the
+// first time nowhere obvious to start - every other feature here (spread
+// predictions, Monte Carlo, the click-a-fire panel) only becomes reachable
+// once they've picked somewhere to look at. This is that entry point: the
+// handful of places on Earth burning hardest right now, one click from view.
+//
+// Deliberately its own fetch on a FIXED grid rather than reading whatever
+// `lastClusters` currently holds, for the same reason updateFireCountEstimate
+// does: the Detail level slider changes the display grid from 3.0deg (a
+// cluster the size of a continent) down to 0.1deg, so a leaderboard derived
+// from it would silently rank completely different things depending on an
+// unrelated display setting. 0.3deg (~33km) is roughly one fire complex.
+// It also ignores the small-fires/ground-fires filters, so the ranking is
+// "what's actually biggest", not "what's biggest among what's displayed".
+const HOTSPOT_GRID_DEG = 0.3;
+const HOTSPOT_COUNT = 5;
+// Two separate refinements, both aimed at the list being five DIFFERENT
+// places rather than five views of the same fire season. Without them a bad
+// week in Siberia filled every row with the word "Russia", which tells a
+// first-time visitor nothing and wastes the only piece of screen furniture
+// pointing them at the rest of the app.
+// - Clusters closer together than this are parts of one fire complex as far
+//   as "somewhere to go look" is concerned, so only the strongest is listed.
+const HOTSPOT_MERGE_KM = 250;
+// - And one country can hold at most this many rows, so a genuinely
+//   enormous fire season somewhere still leaves room for the rest of Earth.
+const HOTSPOT_MAX_PER_COUNTRY = 2;
+// The world data itself only refreshes every 10 minutes server-side (see
+// WORLD_REFRESH_INTERVAL_SECONDS), so polling faster than that would just
+// re-fetch an identical cached response.
+const HOTSPOT_REFRESH_MS = 10 * 60 * 1000;
+const HOTSPOT_FLY_ALTITUDE = 0.3;
+const hotspotList = document.getElementById('hotspotList');
+
+// The candidate pool, not the final five. Kept whole because the final
+// selection depends on country names (see HOTSPOT_MAX_PER_COUNTRY) and the
+// borders are a separate async load - whichever of the two lands first, the
+// list is re-selected and re-labelled once both are in.
+let hotspotClusters = null;
+
+// Coarse (110m) borders miss coastal fires that sit just outside the
+// simplified coastline, so a plain point-in-polygon test alone would label a
+// real fire "unknown" fairly often. Falls back to the nearest country by
+// centroid, phrased as "near X" so the approximation is visible rather than
+// silently presented as fact.
+const HOTSPOT_NEAR_MAX_DEG = 12;
+function regionNameFor(lat, lng) {
+  if (!COUNTRY_LIST.length) return null;
+  const inside = COUNTRY_LIST.find(c => {
+    const b = c.fullBounds;
+    return lat >= b.minLat && lat <= b.maxLat && lng >= b.minLng && lng <= b.maxLng
+      && pointInCountryGeometry(lat, lng, c.geometry);
+  });
+  if (inside) return inside.name;
+
+  let nearest = null;
+  let nearestDist = Infinity;
+  COUNTRY_LIST.forEach(c => {
+    const d = Math.hypot(lat - c.lat, lng - c.lng);
+    if (d < nearestDist) { nearestDist = d; nearest = c; }
+  });
+  return nearest && nearestDist <= HOTSPOT_NEAR_MAX_DEG ? `near ${nearest.name}` : null;
+}
+
+// Walks the candidates strongest-first, keeping one only if it isn't part of
+// an already-listed complex and its country still has room. Greedy on
+// purpose: the strongest fire in any given place is the one worth listing.
+function selectHotspots(candidates) {
+  const chosen = [];
+  const perCountry = new Map();
+  for (const c of candidates) {
+    if (chosen.length >= HOTSPOT_COUNT) break;
+    if (chosen.some(k => haversineKm(k.lat, k.lng, c.lat, c.lng) <= HOTSPOT_MERGE_KM)) continue;
+    const name = regionNameFor(c.lat, c.lng);
+    // Unnamed spots aren't capped - there's no country to count them against,
+    // and they're rare enough not to crowd the list.
+    if (name) {
+      const used = perCountry.get(name) || 0;
+      if (used >= HOTSPOT_MAX_PER_COUNTRY) continue;
+      perCountry.set(name, used + 1);
+    }
+    chosen.push({ ...c, name });
+  }
+  return chosen;
+}
+
+function renderHotspots() {
+  if (!hotspotClusters) return;
+  hotspotList.innerHTML = '';
+  if (!hotspotClusters.length) {
+    const note = document.createElement('p');
+    note.className = 'hotspotNote';
+    note.textContent = 'No fires reported right now.';
+    hotspotList.appendChild(note);
+    return;
+  }
+
+  const chosen = selectHotspots(hotspotClusters);
+  const nameCounts = new Map();
+  chosen.forEach(c => c.name && nameCounts.set(c.name, (nameCounts.get(c.name) || 0) + 1));
+
+  const coords = c =>
+    `${Math.abs(c.lat).toFixed(1)}°${c.lat >= 0 ? 'N' : 'S'}, ${Math.abs(c.lng).toFixed(1)}°${c.lng >= 0 ? 'E' : 'W'}`;
+
+  chosen.forEach(c => {
+    const btn = document.createElement('button');
+
+    const swatch = document.createElement('span');
+    swatch.className = 'hotspotSwatch';
+    // Ranked and coloured by combined FRP, the same number the marker size
+    // and colour on the globe already encode, so the list and the map agree.
+    swatch.style.background = `rgb(${severityBucket(c.totalFrp).join(',')})`;
+
+    const text = document.createElement('span');
+    text.className = 'hotspotText';
+    const name = document.createElement('span');
+    name.className = 'hotspotName';
+    // A country that legitimately holds two of the five gets coordinates
+    // appended, so the rows are still telling you about two different places
+    // rather than reading as a duplicate.
+    name.textContent = !c.name ? coords(c)
+      : nameCounts.get(c.name) > 1 ? `${c.name} · ${coords(c)}`
+      : c.name;
+    const stats = document.createElement('span');
+    stats.className = 'hotspotStats';
+    stats.textContent = `${Math.round(c.totalFrp).toLocaleString()} MW · ${c.count.toLocaleString()} detections`;
+    text.append(name, stats);
+
+    btn.append(swatch, text);
+    btn.title = 'Fly to this fire';
+    // Flies only - deliberately does NOT start a prediction. Predictions are
+    // scoped to a searched country (runCountryPredictions), and silently
+    // kicking one off from here would both surprise the user and spend
+    // Open-Meteo calls they didn't ask for.
+    btn.addEventListener('click', () => {
+      flyToPointOfView({ lat: c.lat, lng: c.lng, altitude: HOTSPOT_FLY_ALTITUDE }, 1200);
+      if (isMobile()) continentPanelEl.classList.remove('mobileOpen');
+    });
+    hotspotList.appendChild(btn);
+  });
+}
+
+async function loadHotspots() {
+  try {
+    const res = await fetch(`/api/fires?grid=${HOTSPOT_GRID_DEG}`);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || 'Failed to load hotspots');
+    // A pool rather than exactly HOTSPOT_COUNT: selectHotspots discards
+    // candidates that merge into an already-listed complex or exceed a
+    // country's share, so it needs spares to still fill five rows.
+    const HOTSPOT_CANDIDATE_POOL = 120;
+    hotspotClusters = json.fires
+      .slice()
+      .sort((a, b) => b.totalFrp - a.totalFrp)
+      .slice(0, HOTSPOT_CANDIDATE_POOL);
+    renderHotspots();
+  } catch (err) {
+    // Leave whatever's already listed rather than blanking a good list on a
+    // transient failure; only the very first attempt has nothing to keep.
+    if (!hotspotClusters) hotspotList.innerHTML = '<p class="hotspotNote">Couldn\'t load right now.</p>';
+  }
+}
+
 // --- "Am I in danger?" address check ---
 const addressInput = document.getElementById('addressInput');
 const addressInputClear = document.getElementById('addressInputClear');
@@ -2136,6 +2576,7 @@ const addressResult = document.getElementById('addressResult');
 const addressRiskBadge = document.getElementById('addressRiskBadge');
 const addressLocationLine = document.getElementById('addressLocationLine');
 const addressProximityLine = document.getElementById('addressProximityLine');
+const addressAirLine = document.getElementById('addressAirLine');
 const addressProbabilityLine = document.getElementById('addressProbabilityLine');
 
 addressInput.addEventListener('input', () => {
@@ -2154,9 +2595,44 @@ function clearAddressCheck() {
   addressRiskBadge.textContent = '';
   addressLocationLine.textContent = '';
   addressProximityLine.textContent = '';
+  addressAirLine.textContent = '';
   addressProbabilityLine.textContent = '';
 }
 addressInputClear.addEventListener('click', clearAddressCheck);
+
+// Fire proximity is only half of "am I in danger" - most people a wildfire
+// actually affects are nowhere near the flames, they're under the smoke,
+// which travels hundreds of kilometres. Without this, somebody 200km
+// downwind of a megafire gets a confident SAFE while breathing hazardous
+// air. It's reported alongside the fire verdict rather than folded into it,
+// because they're genuinely different risks with different responses.
+let addressAirRunId = 0;
+async function updateAddressAirQuality(lat, lng) {
+  const runId = ++addressAirRunId;
+  addressAirLine.textContent = '';
+  try {
+    const res = await fetch('/api/air-quality/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([{ lat, lng }]),
+    });
+    const json = await res.json();
+    if (!res.ok || runId !== addressAirRunId) return;
+    const reading = json.results?.[0];
+    // No measurement is reported as no line at all. Air quality is a health
+    // number someone might act on, so an absent one has to read as absent.
+    if (!reading || reading.us_aqi == null) return;
+    const cat = aqiCategory(reading.us_aqi);
+    const pm = reading.pm2_5 != null ? `, PM2.5 ${reading.pm2_5.toFixed(0)} µg/m³` : '';
+    // Same category colour the smoke plume uses, so "Unhealthy" looks the
+    // same here as it does on the globe.
+    addressAirLine.innerHTML =
+      `<span class="aqiDot" style="background: rgb(${cat.color.join(',')})"></span>` +
+      `Air quality: ${cat.name} (US AQI ${Math.round(reading.us_aqi)}${pm})`;
+  } catch (err) {
+    // Same reasoning - silence beats a guess.
+  }
+}
 
 const ADDRESS_CHECK_RADIUS_DEG = 3; // ~300-330km half-width bbox around the address
 const ADDRESS_CHECK_HOURS = 24; // fixed, independent of the country-prediction sliders
@@ -2229,6 +2705,10 @@ async function checkAddressRisk() {
 
     world.pointOfView({ lat, lng, altitude: 0.3 }, 1200);
     updateHomeMarker(lat, lng);
+    // Deliberately NOT awaited: the fire-proximity check below is the answer
+    // people came for, and it shouldn't wait on (or be failed by) a second
+    // provider. The air line fills itself in a moment later if it arrives.
+    updateAddressAirQuality(lat, lng);
 
     // Ignores the "Show small fires" toggle - that's a display choice for
     // the main map, not something that should hide a real fire from a safety check.
@@ -2408,6 +2888,10 @@ async function checkAddressRisk() {
     addressRiskBadge.textContent = '';
     addressLocationLine.textContent = 'Error: ' + err.message;
     addressProximityLine.textContent = '';
+    // Bumped so an air-quality request still in flight for this same failed
+    // check can't land a reading into what is now an error message.
+    addressAirRunId++;
+    addressAirLine.textContent = '';
     addressProbabilityLine.textContent = '';
     addressResult.style.display = 'block';
   } finally {
@@ -2420,6 +2904,365 @@ addressCheckBtn.addEventListener('click', checkAddressRisk);
 addressInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') checkAddressRisk();
 });
+
+// --- Air quality --------------------------------------------------------
+// US EPA AQI categories. Used both for the address check's air-quality line
+// and to colour the smoke plume, so the same number always reads the same
+// way whichever feature surfaced it.
+const AQI_CATEGORIES = [
+  { max: 50, name: 'Good', color: [0, 228, 0] },
+  { max: 100, name: 'Moderate', color: [255, 255, 0] },
+  { max: 150, name: 'Unhealthy for sensitive groups', color: [255, 126, 0] },
+  { max: 200, name: 'Unhealthy', color: [255, 0, 0] },
+  { max: 300, name: 'Very unhealthy', color: [143, 63, 151] },
+  { max: Infinity, name: 'Hazardous', color: [126, 0, 35] },
+];
+function aqiCategory(aqi) {
+  return AQI_CATEGORIES.find(c => aqi <= c.max) || AQI_CATEGORIES[AQI_CATEGORIES.length - 1];
+}
+
+// PM2.5 -> US AQI, using the EPA's 2024 revised breakpoints. Needed because
+// only the plume's SOURCE has a measured AQI from the API; every point
+// downwind has a modelled PM2.5 that still has to be expressed on the same
+// scale for the colouring and the readout to mean anything.
+// Each row is [pmLow, pmHigh, aqiLow, aqiHigh] - AQI is piecewise linear
+// between them, which is the definition, not an approximation.
+const PM25_AQI_BREAKPOINTS = [
+  [0, 9.0, 0, 50],
+  [9.1, 35.4, 51, 100],
+  [35.5, 55.4, 101, 150],
+  [55.5, 125.4, 151, 200],
+  [125.5, 225.4, 201, 300],
+  [225.5, 325.4, 301, 500],
+];
+function pm25ToAqi(pm) {
+  if (pm <= 0) return 0;
+  for (const [pLo, pHi, aLo, aHi] of PM25_AQI_BREAKPOINTS) {
+    if (pm <= pHi) return Math.round(aLo + ((aHi - aLo) * (pm - pLo)) / (pHi - pLo));
+  }
+  return 500; // the scale itself tops out; anything past this is just "off the chart"
+}
+
+// --- Smoke check (circle a region) ---------------------------------------
+// Ties three things this app already knows into the question people actually
+// have during a fire season: where are the fires, where is the wind taking
+// what they're producing, and how bad is the air going to be under it.
+//
+// Scoped to a circle the user draws rather than run globally, which is what
+// makes it cheap: only the fires inside get looked at, so the whole thing is
+// four requests regardless of how much of the world is burning.
+const SMOKE_PLUME_HOURS = 24;
+// Only the strongest few clusters in the circle get a plume. Smoke from many
+// small neighbouring fires merges into one mass in reality anyway, so drawing
+// every one separately would cost API calls to produce visual noise.
+const SMOKE_MAX_SOURCES = 5;
+const SMOKE_SOURCE_GRID_DEG = 0.5; // ~55km - roughly one merged smoke source
+// Smoke is carried at close to the full wind speed, unlike a fire FRONT
+// (spreadDistanceKm uses a small fraction of it) - the fire is limited by
+// what it can burn through, an airborne particle isn't. Slightly under 1.0
+// because surface-level smoke is slowed by terrain and mixing.
+const SMOKE_ADVECTION_FRACTION = 0.9;
+const SMOKE_STEP_HOURS = 1;
+// Lateral half-width growth per km travelled (~7 degree half-angle), the
+// standard rough spreading rate for a continuous plume.
+const SMOKE_HALF_ANGLE = 0.12;
+// Concentration model: the same emitted mass spread across a widening plume
+// falls off as roughly 1/(1 + d/scale), and deposition removes it on top of
+// that with a much longer scale length. Anchored on a MEASURED PM2.5 at the
+// source rather than an emission estimate from FRP, so the one number the
+// whole readout rests on is observed rather than assumed.
+const SMOKE_DILUTION_SCALE_KM = 60;
+const SMOKE_DEPOSITION_SCALE_KM = 800;
+const SMOKE_BACKGROUND_PM25 = 5; // clean-air baseline; subtracted before decaying, added back after
+// Below this the plume is indistinguishable from ordinary air, so it's drawn
+// fully transparent rather than as a faint band implying smoke that isn't there.
+const SMOKE_MIN_VISIBLE_AQI = 25;
+const SMOKE_MAX_ALPHA = 0.5;
+
+const smokePanel = document.getElementById('smokePanel');
+const smokePanelClose = document.getElementById('smokePanelClose');
+const smokeCheckBtn = document.getElementById('smokeCheckBtn');
+const smokeHint = document.getElementById('smokeHint');
+const smokeResult = document.getElementById('smokeResult');
+const smokeScale = document.getElementById('smokeScale');
+const smokeRadiusSlider = document.getElementById('smokeRadiusSlider');
+const smokeRadiusLabel = document.getElementById('smokeRadiusLabel');
+
+let smokeCentre = null;      // {lat,lng} once the user has clicked the globe
+let smokeRunId = 0;          // guards against an older run finishing last
+function smokeSelectArmed() { return smokePanel.classList.contains('open') && !smokeCentre; }
+
+function smokeRadiusKm() { return +smokeRadiusSlider.value; }
+
+function clearSmoke() {
+  smokeCentre = null;
+  smokeRunId++; // any in-flight run's results are now stale
+  updateSmokePlume([]);
+  updateSmokeRing(null, 0);
+  smokeResult.innerHTML = '';
+  smokeScale.classList.remove('visible');
+}
+
+function closeSmokePanel() {
+  smokePanel.classList.remove('open');
+  smokeCheckBtn.classList.remove('active');
+  clearSmoke();
+}
+
+function openSmokePanel() {
+  closeFirePanel(); // they share the same slot on screen
+  smokePanel.classList.add('open');
+  smokeCheckBtn.classList.add('active');
+  smokeHint.textContent = 'Click anywhere on the globe to centre the area you want checked.';
+}
+
+smokeCheckBtn.addEventListener('click', () => {
+  if (smokePanel.classList.contains('open')) closeSmokePanel();
+  else openSmokePanel();
+});
+smokePanelClose.addEventListener('click', closeSmokePanel);
+
+smokeRadiusSlider.addEventListener('input', () => {
+  smokeRadiusLabel.textContent = `${smokeRadiusKm()} km`;
+  // The ring follows the slider live so the area is visible while choosing
+  // it; the analysis itself waits for 'change' (pointer release) so dragging
+  // across the range doesn't fire a request per step.
+  if (smokeCentre) updateSmokeRing(smokeCentre, smokeRadiusKm());
+});
+smokeRadiusSlider.addEventListener('change', () => {
+  if (smokeCentre) runSmokeAnalysis(smokeCentre);
+});
+
+// Linear interpolation between the 6-hourly forecast samples, so the plume
+// curves smoothly with a shifting wind instead of turning in hard corners.
+function windAtHour(steps, hours) {
+  if (!steps.length) return null;
+  if (hours <= steps[0].hours_from_now) return { speed: steps[0].wind_speed_kmh, bearing: steps[0].wind_blowing_toward_deg };
+  for (let i = 1; i < steps.length; i++) {
+    if (hours <= steps[i].hours_from_now) {
+      const a = steps[i - 1];
+      const b = steps[i];
+      const w = (hours - a.hours_from_now) / (b.hours_from_now - a.hours_from_now);
+      return {
+        speed: lerp(a.wind_speed_kmh, b.wind_speed_kmh, w),
+        bearing: blendBearing(a.wind_blowing_toward_deg, b.wind_blowing_toward_deg, w),
+      };
+    }
+  }
+  const last = steps[steps.length - 1];
+  return { speed: last.wind_speed_kmh, bearing: last.wind_blowing_toward_deg };
+}
+
+function smokeCentreline(source, steps) {
+  const points = [{ lat: source.lat, lng: source.lng, distanceKm: 0, hours: 0, bearing: null }];
+  let lat = source.lat;
+  let lng = source.lng;
+  let distanceKm = 0;
+  for (let h = 0; h < SMOKE_PLUME_HOURS; h += SMOKE_STEP_HOURS) {
+    const wind = windAtHour(steps, h);
+    if (!wind) break;
+    const legKm = wind.speed * SMOKE_STEP_HOURS * SMOKE_ADVECTION_FRACTION;
+    const next = destinationPoint(lat, lng, wind.bearing, legKm);
+    lat = next.lat;
+    lng = next.lng;
+    distanceKm += legKm;
+    points.push({ lat, lng, distanceKm, hours: h + SMOKE_STEP_HOURS, bearing: wind.bearing });
+  }
+  return points;
+}
+
+function smokePm25At(sourcePm25, distanceKm) {
+  const excess = Math.max(0, sourcePm25 - SMOKE_BACKGROUND_PM25);
+  const dilution = SMOKE_DILUTION_SCALE_KM / (SMOKE_DILUTION_SCALE_KM + distanceKm);
+  const deposition = Math.exp(-distanceKm / SMOKE_DEPOSITION_SCALE_KM);
+  return SMOKE_BACKGROUND_PM25 + excess * dilution * deposition;
+}
+
+// Cross-sections perpendicular to the local direction of travel, widening
+// with distance. Alpha tracks how unhealthy the air is rather than just
+// fading with distance, so a plume that stays dangerous a long way out
+// stays visible, and one that dilutes quickly disappears quickly.
+function smokeBandFor(centreline, sourcePm25, sourceRadiusKm) {
+  return centreline.map((p, i) => {
+    const heading = p.bearing
+      ?? (centreline[i + 1] ? bearingBetween(p.lat, p.lng, centreline[i + 1].lat, centreline[i + 1].lng) : 0);
+    const halfWidthKm = sourceRadiusKm + SMOKE_HALF_ANGLE * p.distanceKm;
+    const aqi = pm25ToAqi(smokePm25At(sourcePm25, p.distanceKm));
+    const visible = clamp((aqi - SMOKE_MIN_VISIBLE_AQI) / (150 - SMOKE_MIN_VISIBLE_AQI), 0, 1);
+    return {
+      left: destinationPoint(p.lat, p.lng, heading - 90, halfWidthKm),
+      right: destinationPoint(p.lat, p.lng, heading + 90, halfWidthKm),
+      color: aqiCategory(aqi).color,
+      alpha: visible * SMOKE_MAX_ALPHA,
+    };
+  });
+}
+
+function renderSmokeScale() {
+  smokeScale.innerHTML =
+    '<div id="smokeScaleBar">' +
+    AQI_CATEGORIES.map(c => `<span style="background: rgb(${c.color.join(',')})"></span>`).join('') +
+    '</div><div id="smokeScaleLabels"><span>Good</span><span>Unhealthy</span><span>Hazardous</span></div>';
+  smokeScale.classList.add('visible');
+}
+
+// Countries the plume actually passes over, sampled along the centreline.
+// Free (the borders are already loaded for labels and search) and it turns
+// an abstract shape on a globe into "this is heading for Spain".
+function countriesAlong(centreline) {
+  const seen = [];
+  centreline.forEach(p => {
+    const name = regionNameFor(p.lat, p.lng);
+    if (name && !name.startsWith('near ') && !seen.includes(name)) seen.push(name);
+  });
+  return seen;
+}
+
+async function runSmokeAnalysis(centre) {
+  const runId = ++smokeRunId;
+  const radiusKm = smokeRadiusKm();
+  smokeCentre = centre;
+  updateSmokeRing(centre, radiusKm);
+  smokeHint.textContent = 'Click again to move the search area.';
+  smokeResult.innerHTML = '<p>Checking...</p>';
+  smokeScale.classList.remove('visible');
+
+  const stale = () => runId !== smokeRunId;
+
+  try {
+    // Bounding box first (that's what the API takes), then an exact radius
+    // filter - a box would otherwise include corners up to 40% further out
+    // than the circle the user drew and was shown.
+    const latPad = radiusKm / 111;
+    const lngPad = latPad / Math.max(0.15, Math.cos((centre.lat * Math.PI) / 180));
+    const bbox = [
+      clamp(centre.lng - lngPad, -180, 180), clamp(centre.lat - latPad, -90, 90),
+      clamp(centre.lng + lngPad, -180, 180), clamp(centre.lat + latPad, -90, 90),
+    ].join(',');
+    const firesRes = await fetch(`/api/fires?bbox=${bbox}`);
+    const firesJson = await firesRes.json();
+    if (stale()) return;
+    if (!firesRes.ok) throw new Error(firesJson.detail || 'Failed to load fires');
+
+    const inCircle = firesJson.fires.filter(
+      f => haversineKm(centre.lat, centre.lng, f.lat, f.lng) <= radiusKm);
+    if (inCircle.length === 0) {
+      updateSmokePlume([]);
+      smokeResult.innerHTML =
+        `<p>No active fire detections within ${radiusKm} km of this point.</p>` +
+        '<p class="smokeCaveat">Try a larger radius, or a spot with visible fire markers.</p>';
+      return;
+    }
+
+    const sources = clusterFires(inCircle, SMOKE_SOURCE_GRID_DEG)
+      .sort((a, b) => b.totalFrp - a.totalFrp)
+      .slice(0, SMOKE_MAX_SOURCES);
+    const points = sources.map(s => ({ lat: s.lat, lng: s.lng }));
+
+    // Both lookups at once - they're independent, and the forecast one is
+    // the slow half.
+    const [forecastRes, airRes] = await Promise.all([
+      fetch('/api/wind/forecast/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points, hours: SMOKE_PLUME_HOURS }),
+      }),
+      fetch('/api/air-quality/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(points),
+      }),
+    ]);
+    const forecastJson = await forecastRes.json();
+    const airJson = await airRes.json();
+    if (stale()) return;
+    if (!forecastRes.ok) throw new Error(forecastJson.detail || 'Failed to load wind forecast');
+
+    const airResults = airRes.ok ? (airJson.results || []) : [];
+    // Any source with a real measurement is a better anchor than none - if
+    // this particular source's reading is missing, the strongest reading
+    // from elsewhere in the same circle is still the same smoke mass.
+    const measured = airResults.filter(a => a.pm2_5 != null);
+    const bestMeasuredPm25 = measured.length ? Math.max(...measured.map(a => a.pm2_5)) : null;
+
+    const bands = [];
+    let strongest = null;
+    sources.forEach((source, i) => {
+      const steps = forecastJson.results?.[i]?.steps;
+      if (!steps || !steps.length) return;
+      const sourcePm25 = airResults[i]?.pm2_5 ?? bestMeasuredPm25;
+      if (sourcePm25 == null) return; // nothing measured anywhere - see the endpoint's note on not inventing one
+      const centreline = smokeCentreline(source, steps);
+      // The circle's own extent stands in for the initial plume width: a
+      // cluster of fires 30km across doesn't start as a point source.
+      const sourceRadiusKm = Math.max(5, Math.min(radiusKm * 0.25, 25));
+      bands.push(smokeBandFor(centreline, sourcePm25, sourceRadiusKm));
+      if (!strongest || source.totalFrp > strongest.source.totalFrp) {
+        strongest = { source, steps, centreline, sourcePm25 };
+      }
+    });
+
+    updateSmokePlume(bands);
+
+    const totalFrp = sources.reduce((sum, s) => sum + s.totalFrp, 0);
+    const lines = [
+      `<p class="smokeHeadline">${inCircle.length.toLocaleString()} detections · ` +
+      `${sources.length} smoke source${sources.length === 1 ? '' : 's'} · ` +
+      `${Math.round(totalFrp).toLocaleString()} MW</p>`,
+    ];
+
+    if (!strongest) {
+      lines.push('<p>No air quality measurement was available for this area, so the smoke ' +
+                 'concentration downwind can\'t be estimated right now.</p>');
+      smokeResult.innerHTML = lines.join('');
+      return;
+    }
+
+    const sourceAqi = pm25ToAqi(strongest.sourcePm25);
+    const cat = aqiCategory(sourceAqi);
+    lines.push(
+      `<p><span id="smokeAqiBadge" style="background: rgb(${cat.color.join(',')})">` +
+      `AQI ${sourceAqi} · ${cat.name}</span></p>`,
+      `<p>Measured at the fire: <strong>${strongest.sourcePm25.toFixed(0)} µg/m³</strong> PM2.5</p>`
+    );
+
+    const end = strongest.centreline[strongest.centreline.length - 1];
+    const travelBearing = bearingBetween(
+      strongest.source.lat, strongest.source.lng, end.lat, end.lng);
+    const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    const heading = COMPASS[Math.round(travelBearing / 45) % 8];
+    lines.push(
+      `<p>Carried <strong>${heading}</strong>, reaching about ` +
+      `<strong>${Math.round(end.distanceKm)} km</strong> in ${SMOKE_PLUME_HOURS}h</p>`
+    );
+
+    // A couple of concrete distances, because "the plume is 400km long" says
+    // nothing about whether being under it matters.
+    const samples = [50, 150, 300].filter(d => d <= end.distanceKm);
+    if (samples.length) {
+      const parts = samples.map(d => {
+        const aqi = pm25ToAqi(smokePm25At(strongest.sourcePm25, d));
+        return `${d} km: AQI ~${aqi} (${aqiCategory(aqi).name.toLowerCase()})`;
+      });
+      lines.push(`<p>Downwind — ${parts.join('; ')}</p>`);
+    }
+
+    const crossed = countriesAlong(strongest.centreline);
+    if (crossed.length > 1) lines.push(`<p>Passes over: ${crossed.join(', ')}</p>`);
+
+    lines.push(
+      '<p class="smokeCaveat">Concentrations downwind are modelled from one measured ' +
+      'reading at the fire and the forecast wind - a rough guide to where smoke goes, ' +
+      'not a substitute for a local air quality monitor.</p>'
+    );
+    smokeResult.innerHTML = lines.join('');
+    renderSmokeScale();
+  } catch (err) {
+    if (stale()) return;
+    updateSmokePlume([]);
+    smokeResult.innerHTML = `<p>Couldn't check this area: ${err.message}</p>`;
+  }
+}
 
 // --- Fire detail panel (click a marker) ----------------------------------
 // Markers are one batched THREE.Points cloud (one draw call), which is what
@@ -2565,6 +3408,21 @@ globeCanvas().addEventListener('pointerup', e => {
   fireRaycaster.params.Points.threshold = raycastThresholdForCamera(camera, rect.height);
   fireRaycaster.setFromCamera(firePointer, camera);
 
+  // While the smoke tool is open, a click on the globe places (or moves) the
+  // search area instead of selecting a fire. The two panels share a slot on
+  // screen and are alternative modes, so the click means one or the other,
+  // never both. Clicking off the globe entirely (into space) is ignored
+  // rather than treated as a miss, so a stray click can't wipe the result.
+  if (smokePanel.classList.contains('open')) {
+    const surface = new THREE.Vector3();
+    const globeSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), Math.sqrt(globeSurfaceRadiusSq()));
+    if (fireRaycaster.ray.intersectSphere(globeSphere, surface)) {
+      const geo = world.toGeoCoords(surface);
+      runSmokeAnalysis({ lat: geo.lat, lng: geo.lng });
+    }
+    return;
+  }
+
   const hits = fireRaycaster.intersectObject(fireSpritesObject, false);
   if (hits.length === 0) { closeFirePanel(); return; }
 
@@ -2693,6 +3551,10 @@ saveImageBtn.addEventListener('click', saveCurrentView);
 loadFires().finally(() => {
   document.getElementById('loadingOverlay').style.display = 'none';
   initialFiresLoaded = true;
+  // After the main map, not alongside it - the world fire fetch is the slow
+  // part of startup and this shouldn't compete with it for the connection.
+  loadHotspots();
+  setInterval(loadHotspots, HOTSPOT_REFRESH_MS);
 });
 </script>
 </body>
