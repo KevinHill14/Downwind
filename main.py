@@ -602,6 +602,110 @@ HISTORY_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/
 HISTORY_MAX_DAYS_PER_REQUEST = 5
 
 
+# CWFIS's reported-fires layer is a genuine time series: every record carries
+# a record_start/record_end validity window, so asking which records were
+# valid at a given instant returns the ground-confirmed picture AS IT STOOD
+# then, not today's list filtered by a start date.
+#
+# This matters most exactly where the satellite replay looks worst. A large,
+# well-established fire generates enough smoke to hide its own hottest core
+# from a thermal sensor looking down at it, so Canada's biggest fires are
+# often the ones MISSING from a satellite-only replay - the animation quietly
+# understates the fires it should be shouting about. Ground reporting doesn't
+# have that blind spot.
+CWFIS_HISTORY_URL = "https://geoserver.cwfif.nrcan.gc.ca/geoserver/wfs"
+CWFIS_HISTORY_PROPERTIES = "national_fire_id,latitude,longitude,fire_size,stage_of_control_status,record_start,record_end"
+# Rough bounds of Canada. Outside these there is nothing for CWFIS to add, so
+# the request is skipped entirely rather than paying for an empty answer.
+CANADA_BOUNDS = (-141.0, 41.0, -52.0, 84.0)  # west, south, east, north
+
+
+def _bbox_intersects_canada(west: float, south: float, east: float, north: float) -> bool:
+    cw, cs, ce, cn = CANADA_BOUNDS
+    return not (east < cw or west > ce or north < cs or south > cn)
+
+
+def _parse_cwfis_time(value: str) -> datetime:
+    """CWFIS timestamps come back as bare local-looking ISO strings with no
+    zone marker at all ('2026-08-17T23:45:00'), which parse to naive datetimes
+    and then blow up the moment they meet an aware one. They are UTC, so
+    that's attached explicitly here rather than left to chance."""
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+async def _fetch_canada_history(start_date, end_date) -> list[dict]:
+    """Every ground-confirmed active-fire record whose validity window touches
+    the requested date range, in ONE request. Bucketing the records into days
+    happens locally afterwards (see _canada_fires_on_day).
+
+    One request rather than one per day: verified against per-day queries for
+    a full 7-day window and it reproduces them exactly, 0 missing and 0 extra
+    on every day, for a seventh of the requests."""
+    cql = (
+        f"record_end >= {start_date}T00:00:00Z AND record_start <= {end_date}T23:59:59Z "
+        f"AND stage_of_control_status IN ('OC','UC','BH','BM')"
+    )
+    params = {
+        "service": "WFS", "version": "2.0.1", "request": "GetFeature",
+        "outputFormat": "csv", "typeName": "public:cwfif_national_reportedfires",
+        "propertyName": CWFIS_HISTORY_PROPERTIES, "CQL_FILTER": cql,
+    }
+    resp = await _http_client.get(CWFIS_HISTORY_URL, params=params, timeout=90)
+    resp.raise_for_status()
+
+    lines = resp.text.strip().splitlines()
+    if len(lines) < 2:
+        return []
+    idx = {name: i for i, name in enumerate(lines[0].split(","))}
+
+    records = []
+    for line in lines[1:]:
+        cols = line.split(",")
+        try:
+            records.append(
+                {
+                    "lat": float(cols[idx["latitude"]]),
+                    "lng": float(cols[idx["longitude"]]),
+                    # -1 is CWFIS's "size not known yet" sentinel, not a real area.
+                    "ha": max(0.0, float(cols[idx["fire_size"]] or 0)),
+                    "start": _parse_cwfis_time(cols[idx["record_start"]]),
+                    "end": _parse_cwfis_time(cols[idx["record_end"]]),
+                }
+            )
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue  # one bad row shouldn't drop the rest
+    return records
+
+
+def _canada_fires_on_day(records: list[dict], day) -> list[Fire]:
+    """The ground-confirmed fires burning on `day`, as Fire objects.
+
+    Sampled at noon UTC rather than over the whole day: records are short
+    status snapshots, so a fire has exactly one record covering any given
+    instant but many across a day, and taking the whole day would count the
+    same fire several times over."""
+    noon = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
+    day_str = day.isoformat()
+    out = []
+    for r in records:
+        if r["start"] <= noon <= r["end"]:
+            out.append(
+                Fire(
+                    lat=r["lat"], lng=r["lng"],
+                    confidence="h",  # agency-reported, the highest tier this app has
+                    # Same hectares-based FRP proxy the live feed uses, so a
+                    # ground fire carries comparable weight in a cluster
+                    # whether you're looking at today or at last Tuesday.
+                    frp=max(30.0, math.log1p(r["ha"]) * 15),
+                    acq_date=day_str,
+                    acq_time="1200",
+                    ha=r["ha"],
+                )
+            )
+    return out
+
+
 def _history_chunks(days: int) -> list[tuple[str, int]]:
     """The (start_date, day_count) pairs covering the last `days` days up to
     and including today, none longer than the API allows and none
@@ -722,22 +826,39 @@ def _round_history_clusters(clusters: list[dict]) -> list[dict]:
     return clusters
 
 
-def _group_history_by_day(fires: list[Fire], grid: float) -> list[dict]:
+def _group_history_by_day(fires: list[Fire], grid: float, ground_by_day: dict | None = None) -> list[dict]:
     by_date: dict[str, list[Fire]] = {}
     for f in fires:
         by_date.setdefault(f.acq_date, []).append(f)
-    return [
-        # math.inf: cluster everything, including intense detections - see
-        # _cluster_fires. A history frame is about where activity WAS, and at
-        # a week/continent scale individual hotspots are neither legible nor
-        # affordable.
-        {
-            "date": date,
-            "fires": _round_history_clusters(_cluster_fires(day_fires, grid, math.inf)),
-            "raw_count": len(day_fires),
-        }
-        for date, day_fires in sorted(by_date.items())
-    ]
+
+    # Ground-confirmed fires can exist on a day the satellites saw nothing at
+    # all, so their dates seed the set rather than only annotating days that
+    # already have satellite data.
+    for date in (ground_by_day or {}):
+        by_date.setdefault(date, [])
+
+    out = []
+    for date, day_fires in sorted(by_date.items()):
+        ground = (ground_by_day or {}).get(date, [])
+        if ground:
+            # Same de-duplication the live map applies: a big fire complex
+            # would otherwise appear as one ground marker PLUS the scatter of
+            # satellite pixels across its own footprint, inflating the day's
+            # totals for the exact fires this is meant to represent properly.
+            day_fires = _dedupe_against_ground(day_fires, ground) + ground
+        out.append(
+            # math.inf: cluster everything, including intense detections - see
+            # _cluster_fires. A history frame is about where activity WAS, and
+            # at a week/continent scale individual hotspots are neither
+            # legible nor affordable.
+            {
+                "date": date,
+                "fires": _round_history_clusters(_cluster_fires(day_fires, grid, math.inf)),
+                "raw_count": len(day_fires),
+                "ground_count": len(ground),
+            }
+        )
+    return out
 
 
 @app.get("/api/fires/history")
@@ -789,16 +910,30 @@ async def get_fires_history(
     except asyncio.TimeoutError:
         raise HTTPException(status_code=503, detail="Server is busy right now - please try again in a moment.")
     try:
+        window = [
+            (datetime.now(timezone.utc) - timedelta(days=n)).date()
+            for n in range(days - 1, -1, -1)
+        ]
+        wants_ground = _bbox_intersects_canada(west, south, east, north)
+
+        async def canada_history():
+            if not wants_ground:
+                return []
+            return await _fetch_canada_history(window[0], window[-1])
+
         results = await asyncio.gather(
             *(
                 _fetch_firms_history(area, source, span, start)
                 for source in FIRMS_SOURCES
                 for start, span in _history_chunks(days)
             ),
+            canada_history(),
             return_exceptions=True,
         )
+        *satellite_results, ground_result = results
+
         fires = []
-        for r in results:
+        for r in satellite_results:
             if isinstance(r, Exception):
                 # One satellite (or one chunk of the window) failing still
                 # leaves a usable animation from the rest, which is much
@@ -807,17 +942,35 @@ async def get_fires_history(
                 continue
             fires.extend(r)
 
-        if not fires:
+        ground_by_day: dict[str, list[Fire]] = {}
+        if isinstance(ground_result, Exception):
+            # A supplement, not the backbone - the satellite animation still
+            # goes out if CWFIS is down or changes shape.
+            print(f"[history] CWFIS request failed: {type(ground_result).__name__}: {ground_result}")
+        elif ground_result:
+            for day in window:
+                in_box = [
+                    f for f in _canada_fires_on_day(ground_result, day)
+                    if west <= f.lng <= east and south <= f.lat <= north
+                ]
+                if in_box:
+                    ground_by_day[day.isoformat()] = in_box
+
+        if not fires and not ground_by_day:
             raise HTTPException(status_code=502, detail="No history available for this area right now.")
 
         # Same reasoning as the live endpoint: grouping and clustering a week
         # of detections is pure synchronous Python heavy enough to stall every
         # other request on the event loop if run inline.
-        days_out = await asyncio.to_thread(_group_history_by_day, fires, grid)
+        days_out = await asyncio.to_thread(_group_history_by_day, fires, grid, ground_by_day)
         payload = {
             "days": days_out,
             "bbox": {"west": west, "south": south, "east": east, "north": north},
             "clipped": clipped,
+            # Lets the frontend say so when ground data is contributing, since
+            # it's the difference between a believable Canadian replay and one
+            # that's mostly missing its biggest fires.
+            "has_ground_data": bool(ground_by_day),
         }
         # Encoded and compressed off the event loop too - for a week of a
         # continent this is seconds of pure CPU, and doing it inline would

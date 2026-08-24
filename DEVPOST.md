@@ -57,6 +57,10 @@ Every fire marker on screen is a single batched draw call rather than thousands 
 
 **Half of Siberia didn't exist.** Point-in-polygon maths treats longitude as a flat number line. Russia's outline crosses the antimeridian, jumping from +180° to −180°, which tears the shape in half in flat coordinates. Every fire in Siberia — some of the largest on Earth — tested as being in no country at all, and searching "Russia" returned almost nothing. Silently, for weeks, without a single error. It now returns 98,309 detections. The obvious one-line fix turned out to be *worse than the bug*, resolving New Delhi to Mexico.
 
+**The fires a satellite can't see are the big ones.** Thermal detection from orbit has a blind spot that gets *worse* as a fire gets more serious: a large, established fire makes enough smoke to hide its own hottest core from a sensor looking straight down at it. Our 7-day replay was satellite-only, and playing back Canada showed fires apparently *thinning out* over a week when they were actually intensifying. Watching your own animation quietly under-report a fire season is a good way to find a data problem.
+
+We found that Canada's CWFIS publishes its reported-fires layer as a proper time series — every record carries a validity window — so you can ask what the ground-confirmed picture was on a *past* day, rather than filtering today's list. Merging that in, we measured that on the smokiest days in eastern Canada roughly **three quarters** of the fire activity came from ground reports. The satellite-only replay had been showing about a third of reality.
+
 **Three out-of-memory crashes, all the same mistake.** Caching assembled Python objects instead of compressed response bytes, three times in three different places, on a 512 MB box. The third time we finally wrote it down.
 
 **A 29-second first load.** Profiling found the bottleneck was nowhere near where we'd have guessed — see below.

@@ -338,7 +338,7 @@
   #historyScrub { width: 190px; }
   /* Fixed width and tabular figures so the bar doesn't jitter as the date
      changes underneath it during playback. */
-  #historyDate { min-width: 118px; text-align: center; font-variant-numeric: tabular-nums; }
+  #historyDate { min-width: 168px; text-align: center; font-variant-numeric: tabular-nums; }
   #historyClose { color: var(--text-faint); }
 
   /* ---- Disclaimer / loading -------------------------------------------- */
@@ -3298,7 +3298,11 @@ function showHistoryDay(index) {
   const day = historyData.days[index];
   if (!day) return;
   historyScrub.value = index;
-  historyDate.textContent = `${formatHistoryDate(day.date)} · ${day.raw_count.toLocaleString()}`;
+  // Ground-confirmed shown separately rather than folded into the total: on
+  // a smoky day over Canada it can be most of the number, and that split is
+  // the whole point of merging the two sources.
+  const groundNote = day.ground_count ? ` (${day.ground_count.toLocaleString()} ground)` : '';
+  historyDate.textContent = `${formatHistoryDate(day.date)} · ${day.raw_count.toLocaleString()}${groundNote}`;
   renderPreClusteredMarkers(day.fires);
 }
 
@@ -3384,11 +3388,16 @@ async function enterHistory() {
     historyScrub.max = json.days.length - 1;
     historyScrub.value = 0;
     const span = `${formatHistoryDate(json.days[0].date)} - ${formatHistoryDate(json.days[json.days.length - 1].date)}`;
-    statusEl.textContent = json.clipped
-      // Said out loud rather than silently showing a smaller area than the
-      // one the user was looking at.
-      ? `Last ${json.days.length} days (${span}) - area trimmed to fit`
-      : `Last ${json.days.length} days (${span})`;
+    const notes = [];
+    // Said out loud rather than silently showing a smaller area than the one
+    // the user was looking at.
+    if (json.clipped) notes.push('area trimmed to fit');
+    // Worth stating: over Canada the ground-confirmed feed contributes the
+    // majority of the fires on some days, and it's the reason the replay
+    // doesn't appear to lose its biggest fires whenever smoke thickens.
+    if (json.has_ground_data) notes.push('incl. ground-confirmed');
+    statusEl.textContent =
+      `Last ${json.days.length} days (${span})${notes.length ? ' - ' + notes.join(', ') : ''}`;
     showHistoryDay(0);
     startHistoryPlayback();
   } catch (err) {

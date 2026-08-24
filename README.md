@@ -64,7 +64,9 @@ Unlike the wind endpoints, this has **no synthetic fallback**: a made-up wind di
 ### Last 7 days (playback & scrubber)
 The live map answers *"what is burning now"*. This answers *"which way has it been going"* — which a single snapshot structurally cannot. One day of detections is a scatter of dots; the same region played day by day shows a fire front actually moving across the ground. It's also the only part of the app that is pure observation rather than forecast.
 
-Press **Last 7 days** to fetch the week for whatever region is on screen, then play it, pause it, or drag the scrubber to any single day. Leaving playback restores the live view exactly.
+Press **Replay the last 7 days** to fetch the week for whatever region is on screen, then play it, pause it, or drag the scrubber to any single day. Leaving playback restores the live view exactly.
+
+Over Canada it merges **ground-confirmed history** alongside the satellite record, reconstructed from CWFIS's time-series layer for each day. That matters more than it sounds: on smoky days the ground feed supplies most of the fire activity, because the biggest fires are the ones most likely to be hidden from a satellite by their own smoke. The day counter shows the split (`Aug 23 · 3,151 (288 ground)`).
 
 ### Biggest fires right now
 The globe opens on tens of thousands of markers with nowhere obvious to start, and every other feature here only becomes reachable once you've picked somewhere to look. This panel is that entry point: the five places on Earth burning hardest, one click from view.
@@ -239,7 +241,7 @@ All endpoints are JSON. None require auth from the browser (the backend holds th
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/fires` | GET | Fire data. `bbox`, `grid`, `min_frp`, `min_confidence`, `min_hectares` query params filter/cluster it. `count_only=1` returns just the counts, skipping the fire list. Returns `ready: false` if the server hasn't finished its first fetch from NASA yet. |
-| `/api/fires/history` | GET | The last `days` (2–7) of detections in a region, split by day, for the playback animation. `bbox` is required — a whole-world week is far too much data. Oversized boxes are clipped around their centre, and the response says so. |
+| `/api/fires/history` | GET | The last `days` (2–7) of detections in a region, split by day, for the playback animation. `bbox` is required — a whole-world week is far too much data. Oversized boxes are clipped around their centre, and the response says so. Over Canada it also merges ground-confirmed history from CWFIS's time-series layer (`has_ground_data`, per-day `ground_count`). |
 | `/api/air-quality/batch` | POST | Ground-level PM2.5 and US AQI for a list of points. Returns nulls, never estimates, where no measurement is available. |
 | `/api/wind/batch` | POST | Current wind for a list of `{lat, lng}` points. |
 | `/api/wind/forecast/batch` | POST | Hourly wind + humidity + precipitation + temperature forecast for a list of points, over `hours` hours. |
@@ -294,6 +296,24 @@ The prediction feature depends on a free third-party weather API, and getting it
    → Added a two-level fallback: a point whose weather data couldn't be fetched now borrows the nearest point's real reading that *did* succeed; if literally nothing in the whole request succeeded, it falls back to a plausible synthetic default. A prediction now always returns a marker for every point, regardless of the weather API's availability — it just occasionally trades exact precision for an approximation instead of failing visibly.
 
 The broader lesson from this whole chain: the first few fixes were all real improvements, but each was solving one layer of a problem that had another layer underneath it, discoverable only by testing against real production logs rather than local conditions (a personal, non-shared IP never reproduced the underlying issue at all).
+
+### The fires a satellite can't see are the big ones
+Satellite thermal detection has a blind spot that gets worse exactly as a fire gets more serious: a large, well-established fire generates enough smoke to obscure its own hottest core from a sensor looking straight down at it. So the fires most worth showing are the ones most likely to be missing.
+
+This is invisible on the live map, because Canada's ground-confirmed feed is merged in there. It was glaring in the 7-day replay, which was satellite-only — playing back Canada showed fires *thinning out* over the week when they were in fact intensifying. Watching your own animation quietly under-report a fire season is a good way to notice a data problem.
+
+The fix was finding that CWFIS publishes its reported-fires layer through a GeoServer WFS endpoint where every record carries a `record_start`/`record_end` validity window. That makes it a genuine time series: asking which records were valid at noon on a past day returns the ground-confirmed picture **as it stood then**, not today's list filtered by a start date.
+
+One request covers the whole window and the days are bucketed locally. That was verified against per-day queries across a full 7-day window before being relied on — identical on every day, 0 missing and 0 extra, for a seventh of the requests.
+
+How much it mattered, measured:
+
+| Region | Total detections/day | From ground reports |
+|---|---|---|
+| Quebec / Ontario | 159–215 | **116–138 (65–75%)** |
+| BC / Alberta (Aug 23–24) | 271–284 | **179–197 (66–70%)** |
+
+On the smokiest days in eastern Canada, roughly **three quarters** of the fire activity came from ground reports. A satellite-only replay was showing about a third of reality.
 
 ### A 29-second first load, and where it actually went
 The default world view took **29.4 seconds** to build on a cold cache. Rather than guess, we timed every stage of the request (`profile_load.py`, still in the repo). The result was not what any of us would have picked:
