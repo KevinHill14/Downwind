@@ -680,6 +680,18 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 // Mirrors the @media (max-width: 820px) breakpoint in the CSS.
 function isMobile() { return window.matchMedia('(max-width: 820px)').matches; }
 
+// Readout text. "3 active fire(s) detected" and "168hr" are how a developer
+// writes a number into a string; neither is how anyone reads one.
+function plural(n, noun, pluralForm) {
+  return `${n.toLocaleString()} ${n === 1 ? noun : (pluralForm || noun + 's')}`;
+}
+function describeHours(hours) {
+  if (hours % 24 === 0) return plural(hours / 24, 'day');
+  if (hours < 24) return plural(hours, 'hour');
+  // Mixed windows read better split than as a bare hour count.
+  return `${plural(Math.floor(hours / 24), 'day')} ${plural(hours % 24, 'hour')}`;
+}
+
 // Fire severity scale: log-normalized so a handful of very intense fires
 // (or clusters) don't wash out everything else at max marker size.
 const FRP_SCALE_REF = 150; // MW - combined FRP that reads as "maximum severity"
@@ -1875,7 +1887,7 @@ async function loadCountryFires(country) {
     // it, this resumed chain would render a now-stale country's markers.
     if (inCountryView) {
       renderFireMarkers(fires, country.altitude);
-      statusEl.textContent = `${fires.length} active fire detections in ${country.name}`;
+      statusEl.textContent = `${plural(fires.length, 'active fire detection')} in ${country.name}`;
     }
     return fires;
   } catch (err) {
@@ -2107,7 +2119,7 @@ async function runCountryPredictions(country, fires) {
     .sort((a, b) => b.totalFrp - a.totalFrp)
     .slice(0, MAX_PREDICTIONS);
 
-  predictionInfo.innerHTML = `<p>Projecting ${hours}hr fire locations for ${targets.length} marker(s) in ${country.name}...</p>`;
+  predictionInfo.innerHTML = `<p>Projecting ${describeHours(hours)} ahead for ${plural(targets.length, 'marker')} in ${country.name}...</p>`;
   // Open-Meteo can take 4-20s+ for the same request shape - a static
   // message with no feedback reads as frozen, so this ticks a live
   // elapsed-seconds counter instead.
@@ -2115,7 +2127,7 @@ async function runCountryPredictions(country, fires) {
   const progressIntervalId = setInterval(() => {
     const elapsedSec = Math.floor((Date.now() - predictionStartedAt) / 1000);
     const p = predictionInfo.querySelector('p');
-    if (p) p.textContent = `Projecting ${hours}hr fire locations for ${targets.length} marker(s) in ${country.name}... (${elapsedSec}s)`;
+    if (p) p.textContent = `Projecting ${describeHours(hours)} ahead for ${plural(targets.length, 'marker')} in ${country.name}... (${elapsedSec}s)`;
   }, 1000);
 
   try {
@@ -2407,9 +2419,12 @@ async function runCountryPredictions(country, fires) {
        The cyan area covers everywhere they landed - wide means the wind could
        genuinely go several ways, tight means the projection is confident.</p>`
     : '';
+  const projectedNote = projectedCount === targets.length
+    ? `all ${plural(targets.length, 'marker')}`
+    : `${projectedCount} of ${targets.length} markers`;
   predictionInfo.innerHTML = `
-    <p>${country.name}: ${fires.length} active fire(s) detected</p>
-    <p>Projected ${hours}hr position for ${projectedCount} of ${targets.length} marker(s)</p>
+    <p>${plural(fires.length, 'active fire')} detected in ${country.name}</p>
+    <p>Projected ${describeHours(hours)} ahead for ${projectedNote}</p>
     ${mcNote}
   `;
   } catch (err) {
@@ -3161,7 +3176,7 @@ async function checkAddressRisk() {
     addressLocationLine.textContent += source === 'nominatim' ? ' (via OpenStreetMap)' : '';
 
     if (worstSource) {
-      const tierLabel = severityTierName(worstFrp).replace(/^./, c => c.toUpperCase());
+      const tierLabel = severityLabel(worstFrp);
       if (worstIsPredicted) {
         addressProximityLine.textContent =
           `${tierLabel} fire predicted to reach ${worstDistanceKm.toFixed(0)} km away in ~${worstEtaHours}h`;
@@ -3864,8 +3879,20 @@ function raycastThresholdForCamera(camera, canvasHeightPx) {
   return (worldHeightAtCam / canvasHeightPx) * FIRE_CLICK_TOLERANCE_PX;
 }
 
+// The internal tiers are named after the marker colours (yellow/orange/red),
+// which is useful in the code and meaningless to a reader - "Yellow fire
+// cluster" tells someone the colour of a dot, not how bad the fire is. These
+// are the same five tiers described by severity instead.
+const SEVERITY_DISPLAY_NAMES = {
+  yellow: 'Low intensity',
+  orange: 'Moderate',
+  red: 'High intensity',
+  extreme: 'Extreme',
+  catastrophic: 'Catastrophic',
+};
 function severityLabel(frp) {
-  return severityTierName(frp).replace(/^./, ch => ch.toUpperCase());
+  const tier = severityTierName(frp);
+  return SEVERITY_DISPLAY_NAMES[tier] || tier.replace(/^./, ch => ch.toUpperCase());
 }
 
 function describeClusterConfidence(marker) {
@@ -3914,7 +3941,7 @@ function openFirePanel(marker) {
   if (age !== null) add('Last detected', age < 1 ? 'under 1h ago' : `${age.toFixed(0)}h ago`);
 
   if (marker.predicted) {
-    add('Projection', `${marker.predictionHours}h ahead`);
+    add('Projection', `${describeHours(marker.predictionHours)} ahead`);
     if (marker.windSpeedKmh !== undefined) add('Wind', `${marker.windSpeedKmh.toFixed(0)} km/h`);
   }
 
