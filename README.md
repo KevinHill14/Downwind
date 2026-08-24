@@ -49,6 +49,28 @@ Prediction window is adjustable 1–7 days. This is explicitly a demo-grade appr
 
 **Playback** — a "See animation" button walks every fire from where it is now to its projected position over the prediction window, so the spread reads as motion rather than a static line. The button doubles as the clock (`Stop (+28h)`). Only the markers move; the projected paths stay drawn underneath as the route, which keeps it to a single buffer update per frame instead of rebuilding hundreds of lines.
 
+### Smoke forecast (circle a region)
+Fire proximity is only half of the danger. The overwhelming majority of people a wildfire harms never see flame — they breathe the smoke, which travels hundreds of kilometres downwind.
+
+Click **Smoke check**, then click anywhere on the globe and pick a radius. The app finds every fire inside that circle, groups them into smoke sources, pulls the **measured** PM2.5 at the strongest ones, and projects where that smoke goes over the next 24 hours using the forecast wind — drawn as a plume whose colour *and* opacity are set per-vertex from the US AQI at that distance. So it reads as dark and solid where the air is genuinely hazardous and fades to nothing where the smoke has diluted back to background. A flat translucent shape would have shown where smoke travels while saying nothing about how bad it is when it gets there.
+
+The readout gives the measured AQI at the fire, the direction and reach of the plume, modelled AQI at 50/150/300 km, and which countries it passes over. Concentration downwind is anchored on a real measurement at the source rather than an emission estimate, then decayed for plume widening and deposition. Smoke is advected at ~90% of wind speed — unlike a fire *front*, which is limited by what it can burn through, an airborne particle isn't.
+
+### Air quality in the address check
+The address check now reports ground-level air quality alongside the fire verdict — never folded into it, because they're genuinely different risks with different responses. Without this, somebody 200 km downwind of a megafire got a confident **SAFE** while breathing hazardous air.
+
+Unlike the wind endpoints, this has **no synthetic fallback**: a made-up wind direction only misaims a drawing on a globe, but a made-up air quality figure is a health number someone might act on. If the measurement isn't available, the line is omitted entirely rather than guessed at.
+
+### Last 7 days (playback & scrubber)
+The live map answers *"what is burning now"*. This answers *"which way has it been going"* — which a single snapshot structurally cannot. One day of detections is a scatter of dots; the same region played day by day shows a fire front actually moving across the ground. It's also the only part of the app that is pure observation rather than forecast.
+
+Press **Last 7 days** to fetch the week for whatever region is on screen, then play it, pause it, or drag the scrubber to any single day. Leaving playback restores the live view exactly.
+
+### Biggest fires right now
+The globe opens on tens of thousands of markers with nowhere obvious to start, and every other feature here only becomes reachable once you've picked somewhere to look. This panel is that entry point: the five places on Earth burning hardest, one click from view.
+
+Ranked on its own fixed clustering grid rather than the current display settings, so an unrelated Detail level change can't alter what it ranks. Clusters within 250 km merge and each country is capped at two rows — without that, a bad week in Siberia filled all five rows with the word "Russia".
+
 ### "Am I in danger?" address check
 Type an address, and the app geocodes it, looks at nearby fires (including their predicted spread), and returns a **Safe / Watch / Danger** badge with the nearest real threat's distance, confidence, and either how long ago it was detected or its predicted time of arrival.
 
@@ -80,9 +102,11 @@ Responsive layout below 820px width: search and settings collapse into icon-trig
 │   (single-file frontend)     │  HTTP   │         (FastAPI backend)      │
 │                               │────────▶│                                 │
 │  - Three.js + globe.gl        │◀────────│  /api/fires                    │
-│  - all UI, all prediction     │  JSON   │  /api/wind/batch                │
-│    math, all rendering        │         │  /api/wind/forecast/batch      │
-└──────────────────────────────┘         │  /api/elevation/batch          │
+│  - all UI, all prediction     │  JSON   │  /api/fires/history             │
+│    math, all rendering        │         │  /api/wind/batch                │
+└──────────────────────────────┘         │  /api/wind/forecast/batch      │
+                                          │  /api/elevation/batch          │
+                                          │  /api/air-quality/batch        │
                                           │  /api/geocode                  │
                                           └─────────────┬───────────────────┘
                                                          │
@@ -159,7 +183,13 @@ These aren't environment variables — they're constants in the code, listed her
 | `_WORLD_VIEW_CACHE_MAX_ENTRIES` | 8 | Max cached world-view responses (LRU). Bounds cache memory — an unbounded version of this cache caused an out-of-memory restart in production. |
 | `_OPEN_METEO_CONCURRENCY` | 1 | How many outbound weather API calls can be in flight at once, across every user. Deliberately fully serialized — see [Problems](#problems-we-ran-into-and-how-we-handled-them). |
 | `_FIRES_COMPUTE_SEMAPHORE` | 20 | How many `/api/fires` requests can be doing real filter/cluster work at once before new ones get a fast "busy, retry" response instead of queuing indefinitely. |
-| `LARGE_FIRE_MIN_FRP` | 27.4 MW | Fires at or above this intensity always render as their own marker, never grouped into a cluster. |
+| `LARGE_FIRE_MIN_FRP` | 27.4 MW | Fires at or above this intensity always render as their own marker, never grouped into a cluster. The history endpoint deliberately overrides this to cluster everything — see [Problems](#problems-we-ran-into-and-how-we-handled-them). |
+| `AIR_QUALITY_CACHE_TTL_SECONDS` | 30 min | How long a PM2.5/AQI reading is reused. Longer than the wind TTL because air quality is only published hourly. |
+| `HISTORY_MAX_DAYS` | 7 | Longest history window. FIRMS caps a single request at 5 days, so a 7-day window is fetched as two chunks per satellite. |
+| `HISTORY_MAX_SPAN_DEG` | 60° | Oversized history boxes are shrunk to this around their centre rather than rejected. |
+| `HISTORY_MIN_CELLS_ACROSS` | 150 | Coarsens history clustering for large areas, bounding response size regardless of the requested grid. |
+| `HISTORY_CACHE_TTL_SECONDS` | 30 min | How long an assembled history response is reused. Stored as gzipped bytes, not Python objects. |
+| `_HISTORY_SEMAPHORE` | 1 | History builds are serialized — they're by far the memory-heaviest thing the server does, and two continent-sized builds overlapping doubles the worst-case footprint on a 512MB box. |
 | `GROUND_DEDUP_RADIUS_DEG` | 0.15° (~15-17km) | How close a satellite detection has to be to a ground-confirmed fire to be treated as "the same fire" and hidden. |
 
 ### Frontend tuning constants (`static/index.html`)
@@ -180,6 +210,17 @@ These aren't environment variables — they're constants in the code, listed her
 | `MC_RISK_ESCALATION_FRACTION` | 0.30 | Share of scenarios that must reach a risk level before the address check raises its rating to match. |
 | `PREDICTION_ANIMATION_DURATION_MS` | 7000 | How long the "See animation" playback takes to cover the whole prediction window. |
 | `FIRE_CLICK_TOLERANCE_PX` | 12 | Click tolerance for selecting a fire marker, in screen pixels (converted to world units per zoom level). |
+| `HOTSPOT_COUNT` | 5 | Rows in the "Biggest fires right now" panel. |
+| `HOTSPOT_MERGE_KM` | 250 | Hotspots closer than this are one fire complex for listing purposes; only the strongest is shown. |
+| `HOTSPOT_MAX_PER_COUNTRY` | 2 | Cap on rows one country can occupy, so one huge fire season doesn't fill the whole list. |
+| `SMOKE_PLUME_HOURS` | 24 | How far ahead the smoke plume is projected. |
+| `SMOKE_ADVECTION_FRACTION` | 0.9 | Smoke travel speed as a fraction of the 10m wind — much higher than a fire front, which is limited by fuel. |
+| `SMOKE_HALF_ANGLE` | 0.12 | Lateral plume widening per km travelled (~7° half-angle). |
+| `SMOKE_DILUTION_SCALE_KM` | 60 | Distance scale over which concentration falls off as the plume widens. |
+| `SMOKE_DEPOSITION_SCALE_KM` | 800 | Much longer scale for particles settling out of the air. |
+| `SMOKE_MAX_SOURCES` | 5 | Strongest fire clusters inside the circle that get their own plume. |
+| `HISTORY_MS_PER_DAY` | 1100 | Playback speed of the 7-day animation, in ms per day. |
+| `HISTORY_MAX_HALF_SPAN_DEG` | 20 | Caps the region a history request covers. Kept tight because FIRMS' response time scales badly with area. |
 
 ---
 
@@ -190,6 +231,8 @@ All endpoints are JSON. None require auth from the browser (the backend holds th
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/fires` | GET | Fire data. `bbox`, `grid`, `min_frp`, `min_confidence`, `min_hectares` query params filter/cluster it. |
+| `/api/fires/history` | GET | The last `days` (2–7) of detections in a region, split by day, for the playback animation. `bbox` is required — a whole-world week is far too much data. Oversized boxes are clipped around their centre, and the response says so. |
+| `/api/air-quality/batch` | POST | Ground-level PM2.5 and US AQI for a list of points. Returns nulls, never estimates, where no measurement is available. |
 | `/api/wind/batch` | POST | Current wind for a list of `{lat, lng}` points. |
 | `/api/wind/forecast/batch` | POST | Hourly wind + humidity + precipitation + temperature forecast for a list of points, over `hours` hours. |
 | `/api/elevation/batch` | POST | Ground elevation for a list of points. |
@@ -204,6 +247,10 @@ All endpoints are JSON. None require auth from the browser (the backend holds th
 - **Retrying isn't always the right move.** Our first instinct when a request failed was "retry with backoff." That's correct for a brief burst, but actively makes things worse against a *sustained* outage — every retry is more load on an already-overwhelmed resource, and it just delays failure instead of preventing it. The fix was learning to tell the two situations apart from real logs, not assumptions.
 - **A synchronous loop over tens of thousands of items blocks *everything* on a single-threaded server**, not just the request that triggered it — including completely unrelated, otherwise-instant requests. This is easy to miss locally (fast machine, low data volume) and only shows up under real concurrent load.
 - **Caching the fully-rendered output, not just the raw data, matters.** Caching a Python object still leaves you re-serializing and re-compressing it on every request; caching the actual response bytes (including the pre-gzipped variant) is what actually removes that repeated cost.
+- **The Earth is round and your maths probably isn't.** Longitude wraps at ±180°, and any geometry that treats it as a flat number line silently produces wrong answers rather than errors — for us, half of Siberia registered as being in no country at all, and the country search for Russia returned nothing, for weeks, without a single exception being thrown. Worse, the obvious fix made *more* things wrong in ways we'd never have noticed without a broad sweep. Wrap-around bugs don't announce themselves.
+- **Ask the API instead of guessing at it.** Two assumptions about NASA's history endpoint (that it accepts a 10-day range, and how a start date interacts with that range) were both settled in under a minute by sending it one request each. Both would have been silent, plausible-looking data bugs if we'd guessed — the first was wrong, the second wasn't.
+- **Check the instrument before optimising against it.** A "cache hit" that looked like it took 5.7 seconds turned out to be the *measuring tool's* overhead; the actual request was 30 ms. We nearly optimised a problem that didn't exist.
+- **The same rule can be right in one context and wrong in another.** Never grouping intense fires into clusters is correct for the live map and actively harmful for a week-long animation. A constant that encodes a judgement call should be a parameter, not a hardcoded assumption baked into a shared function.
 - **Geospatial deduplication and clustering are both just "put things in grid cells" in disguise** — nearest-neighbor-ish problems that look like they need something fancy usually don't; rounding a coordinate to a grid cell key gets you 90% of the way there for a fraction of the complexity of a real spatial index.
 
 ---
@@ -238,6 +285,24 @@ The prediction feature depends on a free third-party weather API, and getting it
 
 The broader lesson from this whole chain: the first few fixes were all real improvements, but each was solving one layer of a problem that had another layer underneath it, discoverable only by testing against real production logs rather than local conditions (a personal, non-shared IP never reproduced the underlying issue at all).
 
+### Half of Siberia didn't exist
+Building the "Biggest fires right now" panel surfaced a bug that had been quietly live the whole time. The panel labels each hotspot by country, and the largest fires on Earth kept coming back as raw coordinates instead of "Russia".
+
+The cause was that point-in-polygon treats longitude as a flat axis. The two countries in our border dataset whose outline crosses the antimeridian (Russia and Fiji) jump straight from +180° to −180°, so in flat lon/lat space the shape is torn in half and the ray-crossing count comes out wrong. The visible consequence was much bigger than a mislabelled list row: **searching "Russia" returned almost no fires**, because the country search filters every detection through that same test. It now returns 98,309.
+
+The fix was to unwrap each ring *once* into a continuous longitude sequence — walk the vertices taking the shorter way round at every step — and cache that per ring, since the country search runs the test over thousands of fires against the same geometry.
+
+Worth recording: the obvious one-line version of this fix (unwrap each vertex relative to the query point) is **worse than the bug**. It tears apart any ring more than 180° away from the point, which measured out as New Delhi resolving to Mexico and open Pacific ocean resolving to Uganda. Verified the real fix against 16 targeted locations plus a sweep of all 176 countries before trusting it.
+
+### A week of data doesn't fit where a day does
+The 7-day history hit three separate scaling walls that the live map never does, all found by measuring rather than reasoning:
+
+- **The same caching mistake, twice.** Caching the assembled Python payload pushed memory to 543 MB, past the 512 MB hosting ceiling — the exact failure mode already fixed once for the world-view cache. Keeping only the gzipped response bytes brought it to 187 MB across six large regions.
+- **A good rule in the wrong context.** Response size was dominated by the rule that fires above 27.4 MW always render individually rather than clustering. That's correct for the live map — a major fire shouldn't be visually diluted by small ones beside it — but a week of Siberia is tens of thousands of above-threshold detections *per day*, which is both illegible at that zoom and megabytes of JSON. History clusters everything; Russia's response went 2089 KB → 307 KB.
+- **Precision nobody asked for.** Cluster centroids were serialized at full float precision for points representing grid cells tens of kilometres across. Rounding to 3 decimals (~110 m) was free.
+
+A fourth "problem" turned out not to exist: a cache hit that appeared to take 5.7 seconds was PowerShell's `Invoke-WebRequest` building its response object. Timed with a raw HTTP client, the same request is 3–114 ms. Worth checking the instrument before optimising against it.
+
 ---
 
 ## Validating the prediction math
@@ -260,3 +325,7 @@ The honest conclusion is that point detections can't cleanly validate a spread m
 - Ground-confirmed (agency-reported) fire data currently covers Canada only.
 - Ocean name labels reuse the country label system but aren't fully built out.
 - A compass showing camera orientation relative to the rest of the world, and a "jump to my own location" street-view-style button, were discussed but not built.
+- Smoke concentrations downwind are modelled from a **single measured reading** at the fire plus the forecast wind — a Gaussian-ish dilution approximation, not an atmospheric dispersion model. It's a guide to where smoke goes, not a substitute for a local air quality monitor.
+- The history animation is capped at 7 days and one region at a time. NASA's endpoint allows at most 5 days per request and its response time scales badly with area, so a whole-world week isn't practical on free hosting.
+- A detection-age filter ("last 6h / 24h / 48h") and shareable URLs that encode the current view are both designed but unbuilt.
+- User accounts and crowd-sourced fire reporting (via Supabase) were scoped and deliberately deferred — they need moderation and row-level security to be trustworthy, which is more than the remaining time allowed.
