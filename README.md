@@ -67,10 +67,11 @@ Click **Where's the smoke going?**, then click anywhere on the globe and pick a 
 
 The plume's colour *and* opacity are set per-vertex from the US AQI at that distance, so it reads as dark and solid where the air is genuinely hazardous and fades to nothing where it has diluted back to background. A flat translucent shape would have shown where smoke goes while saying nothing about how bad it is on arrival.
 
-The readout gives the **provider's published AQI** at the fire, the direction and reach of the plume, **estimated PM2.5** at 50, 150 and 300 km, the distance at which it thins back to ordinary air, and which countries it crosses. Three deliberate choices here:
+The readout gives the **provider's published AQI** at the fire, the direction and reach of the plume, **estimated PM2.5** at distances spanning the whole plume, the point at which it thins back to ordinary air, and which countries it crosses. Three deliberate choices here:
 
 - The source AQI is the provider's own published figure rather than one derived locally. US AQI is defined on an averaging window, so pushing an instantaneous PM2.5 through its breakpoints produces a different number from the official one. At a Ukrainian fire that difference was 55 against a published 69.
 - Downwind figures are quoted in µg/m³ rather than as an AQI, which keeps a modelled number off the same scale as the measured one directly above it.
+- Sample distances span the full plume rather than a fixed 50/150/300 km set, snapped to round numbers with the far tip always included. The fixed set stopped reporting at 300 km while the plume was still drawn out past 800 km, so the far half of what you could see on the globe carried no number at all. Scaling this costs nothing, since the concentration model is arithmetic and the geometry was already full length.
 - A distance is only quoted while the model is still meaningfully above clean air. A weak source sits at background from the first step, and printing "50 km: ~5 (good); 150 km: ~5 (good); 300 km: ~5 (good)" dresses three identical numbers up as a measurement. That case now says the smoke blends into normal air almost immediately, and everything stronger also gets the distance at which it clears.
 
 Concentration downwind is anchored on a real measurement at the source and then decayed for plume widening and deposition. Smoke advects at about 90% of wind speed, well above a fire *front*, which is limited by what it can burn through.

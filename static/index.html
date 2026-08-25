@@ -3698,6 +3698,30 @@ function smokePm25At(sourcePm25, distanceKm) {
 // does not have while telling the reader nothing they can act on.
 const SMOKE_NOTICEABLE_PM25 = 1.5;
 
+// Sample distances spanning the WHOLE plume rather than a fixed 50/150/300.
+// The old fixed set silently stopped reporting at 300 km while the plume was
+// still being drawn out to 500 km or more, so the far half of what you could
+// see on the globe had no number attached to it. Scaling costs nothing, since
+// smokePm25At is arithmetic and the geometry is already drawn full length.
+//
+// Snapped to a round-number ladder so the rows read as distances a person
+// would say out loud, and the far tip is always included, because the end of
+// the plume is the part someone is checking against their own location.
+function smokeSampleDistances(reachKm) {
+  const TARGET_ROWS = 4;
+  const LADDER = [25, 50, 100, 150, 200, 250, 500, 1000];
+  const tip = Math.round(reachKm);
+  if (tip <= 0) return [];
+  const step = LADDER.find(s => s >= reachKm / TARGET_ROWS) ?? LADDER[LADDER.length - 1];
+  const out = [];
+  for (let d = step; d < reachKm; d += step) out.push(d);
+  // Drop a step that sits almost on top of the tip, which would otherwise
+  // print two near-identical rows (for example 200 km and 209 km).
+  if (out.length && tip - out[out.length - 1] < step * 0.3) out.pop();
+  out.push(tip);
+  return out;
+}
+
 // Distance at which the plume has thinned back to ordinary air. The decay is
 // monotonic, so a coarse forward scan finds it without inverting the
 // dilution/deposition product. Returns null when it is still noticeable at
@@ -3923,13 +3947,18 @@ async function runSmokeAnalysis(centre) {
     // 300 km: ~5 (good)" - three identical numbers dressed up as a
     // measurement, telling the reader nothing except that we ran a model.
     const excessAt = d => smokePm25At(strongest.sourcePm25, d) - SMOKE_BACKGROUND_PM25;
-    const samples = [50, 150, 300].filter(d => d <= end.distanceKm && excessAt(d) >= SMOKE_NOTICEABLE_PM25);
+    const samples = smokeSampleDistances(end.distanceKm)
+      .filter(d => excessAt(d) >= SMOKE_NOTICEABLE_PM25);
     if (samples.length) {
       const parts = samples.map(d => {
         const pm = smokePm25At(strongest.sourcePm25, d);
-        return `${d} km ~${pm.toFixed(0)} µg/m³ (${aqiCategory(pm25ToAqi(pm)).name.toLowerCase()})`;
+        return `<strong>${d} km</strong> · ~${pm.toFixed(0)} µg/m³ ` +
+               `(${aqiCategory(pm25ToAqi(pm)).name.toLowerCase()})`;
       });
-      lines.push(`<p>Estimated PM2.5 downwind: ${parts.join('; ')}</p>`);
+      // One per line. Spanning the whole plume means up to five of these, and
+      // a semicolon-separated run of that many wraps into an unreadable block
+      // in a panel this narrow.
+      lines.push(`<p>Estimated PM2.5 downwind:<br>${parts.join('<br>')}</p>`);
       // Where it stops mattering is the more useful number of the two, and
       // it's the one a reader actually wants: "does this reach me or not".
       const clearKm = smokeClearDistanceKm(strongest.sourcePm25, end.distanceKm);
