@@ -1,5 +1,5 @@
 """
-Validates Fire Tracker's spread prediction against what actually happened.
+Validates Downwind's spread prediction against what actually happened.
 
 The prediction math in static/index.html is a hand-tuned heuristic that has
 never been measured against reality - its constants are physically motivated

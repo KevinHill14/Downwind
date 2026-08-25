@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Fire Tracker</title>
+<title>Downwind</title>
 <style>
   /* ---- Design tokens -------------------------------------------------
      Every panel, button and input below is built from these, so the whole
@@ -4154,7 +4154,7 @@ function buildShareableImage(globeDataUrl) {
       ctx.textBaseline = 'top';
       ctx.fillStyle = '#ff8a3d';
       ctx.font = `600 ${Math.round(BAR * 0.26)}px system-ui, sans-serif`;
-      ctx.fillText('Fire Tracker', pad, img.height + BAR * 0.14);
+      ctx.fillText('Downwind', pad, img.height + BAR * 0.14);
 
       const status = (document.getElementById('status').textContent || '').trim();
       ctx.fillStyle = '#ddd';
@@ -4185,7 +4185,7 @@ async function saveCurrentView() {
     // exists in places that still can't take a file attachment.
     if (navigator.canShare?.({ files: [file] })) {
       try {
-        await navigator.share({ files: [file], title: 'Fire Tracker' });
+        await navigator.share({ files: [file], title: 'Downwind' });
         saveImageBtn.textContent = 'Shared';
       } catch (err) {
         // Dismissing the share sheet throws AbortError - a choice, not a fault.

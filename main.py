@@ -1,5 +1,5 @@
 """
-Fire Tracker backend.
+Downwind backend.
 
 Serves:
 - GET /                        -> frontend (static/index.html)
@@ -48,7 +48,7 @@ FIRMS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "VIIRS_NOAA21_NRT"]
 # ingestion gap where the most recent ~24h isn't processed yet.
 FIRMS_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{area}/2"
 
-app = FastAPI(title="Fire Tracker")
+app = FastAPI(title="Downwind")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
