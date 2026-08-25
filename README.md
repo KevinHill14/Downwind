@@ -336,6 +336,8 @@ Three separate problems, none of them the clustering everyone assumes is the bot
 
 Then the actual fix: **none of this work depends on the request**, so the two responses every first-time visitor asks for are now pre-built on the refresh timer, off the request path. Combined: **29.4s → 0.39s**, and the page is interactive in under a second.
 
+The same "stop competing with the thing being looked at" rule governs load *order*. The biggest-fires list is its own fetch at a fixed 0.3° grid, and the server runs on one core — so it now goes strictly last, after both the map and the worldwide count. Switched on mid-load it queues and says "Still loading…" rather than firing immediately; almost nobody flips that toggle inside the couple of seconds the rest of the load takes, and anyone who does would rather have the globe first.
+
 For the third time in this project, a "slow" measurement turned out to be the measuring tool — PowerShell's `Invoke-WebRequest` was adding ~70 seconds handling a 7 MB response body. Timed with a raw HTTP client the same request was under a second. We have started defaulting to the raw client.
 
 ### Half of Siberia didn't exist

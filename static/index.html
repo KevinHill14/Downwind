@@ -2432,10 +2432,9 @@ async function runCountryPredictions(country, fires) {
   // Spells out what the cyan shape means - without this the footprint is
   // just an unexplained blob next to a fire.
   const mcNote = mcOn && mcSampledTargets > 0
-    ? `<p><span class="mcSwatch"></span>${MONTE_CARLO_SAMPLES} wind scenarios per fire, varied inside
-       the forecast's own margin of error. The cyan area covers everywhere they
-       landed - wide means the wind could genuinely go several ways, tight means
-       the projection is confident.</p>`
+    ? `<p><span class="mcSwatch"></span>Cyan shows where the fire could still reach if the
+       wind doesn't do exactly what's forecast. The wider it is, the less certain
+       the prediction.</p>`
     : '';
   const projectedNote = projectedCount === targets.length
     ? `all ${plural(targets.length, 'marker')}`
@@ -2707,10 +2706,13 @@ async function loadFires() {
     // Only once there's actually data to count. Kicked off after the map
     // rather than alongside it, so the two aren't competing for the server's
     // single core while someone is staring at an empty globe.
-    updateFireCountEstimate(filterParams);
+    updateFireCountEstimate(filterParams).finally(markAppLoadComplete);
   } catch (err) {
     statusEl.textContent = 'Error loading fires: ' + err.message;
     console.error(err);
+    // Releases anything queued behind the load (the biggest-fires list) so it
+    // reports its own failure rather than sitting on "Still loading..." forever.
+    markAppLoadComplete();
   }
 }
 
@@ -2898,12 +2900,44 @@ async function loadHotspots() {
 // Loaded on demand rather than at startup. The panel is off by default now,
 // and fetching a list nobody has asked to see would be a request per page
 // load spent on nothing. Polling only runs while it's actually on screen.
+//
+// It is also strictly LAST. This is its own fetch at a fixed 0.3deg grid, and
+// the server runs on one core - so a leaderboard request racing the map's own
+// load takes CPU away from the thing the visitor is actually staring at. Even
+// switched on immediately, it now waits for the map and the worldwide count
+// to finish first and says "Still loading..." in the meantime, which costs
+// nothing in practice: almost nobody flips this within the couple of seconds
+// the rest of the load takes, and the ones who do would rather have the globe.
+let appLoadComplete = false;
+let hotspotLoadPending = false;
+
+function markAppLoadComplete() {
+  if (appLoadComplete) return;
+  appLoadComplete = true;
+  if (hotspotLoadPending) {
+    hotspotLoadPending = false;
+    loadHotspots();
+  }
+}
+
 let hotspotRefreshTimer = null;
 function setHotspotPanelVisible(visible) {
   hotspotPanel.classList.toggle('visible', visible);
   if (visible) {
-    if (!hotspotClusters) loadHotspots();
-    if (hotspotRefreshTimer === null) hotspotRefreshTimer = setInterval(loadHotspots, HOTSPOT_REFRESH_MS);
+    if (!hotspotClusters) {
+      if (appLoadComplete) {
+        loadHotspots();
+      } else {
+        // Queued, not dropped - markAppLoadComplete picks it up.
+        hotspotLoadPending = true;
+        hotspotList.innerHTML = '<p class="hotspotNote">Still loading...</p>';
+      }
+    }
+    if (hotspotRefreshTimer === null) {
+      hotspotRefreshTimer = setInterval(() => {
+        if (appLoadComplete) loadHotspots();
+      }, HOTSPOT_REFRESH_MS);
+    }
   } else if (hotspotRefreshTimer !== null) {
     clearInterval(hotspotRefreshTimer);
     hotspotRefreshTimer = null;
