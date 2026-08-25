@@ -36,12 +36,14 @@ Fire data comes straight from satellites (NASA FIRMS) and, for Canada, ground-co
 ### Fire spread prediction
 Select a country (via search) to see predicted spread for its active fires, at 4 increasing levels of accuracy:
 
-| Strength | Name | What it adds |
-|---|---|---|
-| 1 | Basic | One current wind reading → straight-line projected spread. |
-| 2 | Hourly wind *(default)* | Wind refetched every 6 hours over the prediction window, so the path visibly bends as wind shifts. |
-| 3 | +Terrain | Adds one elevation probe per fire — spread is biased faster downhill / slower uphill. |
-| 4 | Max accuracy | Terrain recomputed every step against that step's actual wind direction, plus humidity, temperature, and precipitation factored into spread speed. |
+| Strength | What it adds |
+|---|---|
+| **Wind now** | One current wind reading → straight-line projected spread. |
+| **Wind as it shifts** *(default)* | Wind refetched every 6 hours over the prediction window, so the path visibly bends as wind shifts. |
+| **Wind + terrain** | Adds one elevation probe per fire — spread is biased faster downhill / slower uphill. |
+| **Wind, terrain + weather** | Terrain recomputed every step against that step's actual wind direction, plus humidity, temperature, and precipitation factored into spread speed. |
+
+The tiers are named for what each one feeds into the projection rather than how good it claims to be — "Basic" and "Max accuracy" told you where a tier sat on a scale but nothing about the difference between them.
 
 Prediction window is adjustable 1–7 days. This is explicitly a demo-grade approximation, not a physical fire-behavior simulation — good for visualizing *a* plausible spread direction, not for real operational decisions.
 
@@ -54,7 +56,7 @@ Fire proximity is only half of the danger. The overwhelming majority of people a
 
 Click **Smoke check**, then click anywhere on the globe and pick a radius. The app finds every fire inside that circle, groups them into smoke sources, pulls the **measured** PM2.5 at the strongest ones, and projects where that smoke goes over the next 24 hours using the forecast wind — drawn as a plume whose colour *and* opacity are set per-vertex from the US AQI at that distance. So it reads as dark and solid where the air is genuinely hazardous and fades to nothing where the smoke has diluted back to background. A flat translucent shape would have shown where smoke travels while saying nothing about how bad it is when it gets there.
 
-The readout gives the measured AQI at the fire, the direction and reach of the plume, modelled AQI at 50/150/300 km, and which countries it passes over. Concentration downwind is anchored on a real measurement at the source rather than an emission estimate, then decayed for plume widening and deposition. Smoke is advected at ~90% of wind speed — unlike a fire *front*, which is limited by what it can burn through, an airborne particle isn't.
+The readout gives the **provider's published AQI** at the fire (not one derived here — the US AQI is defined on an averaging window, so pushing an instantaneous PM2.5 through its breakpoints gives a different answer than the official figure), the direction and reach of the plume, **modelled PM2.5** at 50/150/300 km, and which countries it passes over. Downwind figures are deliberately quoted in µg/m³ rather than as an AQI, so a modelled number never sits on the same scale as the measured one beside it. Concentration downwind is anchored on a real measurement at the source rather than an emission estimate, then decayed for plume widening and deposition. Smoke is advected at ~90% of wind speed — unlike a fire *front*, which is limited by what it can burn through, an airborne particle isn't.
 
 ### Air quality in the address check
 The address check now reports ground-level air quality alongside the fire verdict — never folded into it, because they're genuinely different risks with different responses. Without this, somebody 200 km downwind of a megafire got a confident **SAFE** while breathing hazardous air.

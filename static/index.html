@@ -158,19 +158,19 @@
   #leftStack {
     position: absolute; left: 16px; top: 66px; z-index: 10;
     display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
-    /* Bounded so that turning the hotspot list on can't push the column down
-       into the prediction panel on a short window. Scrolls as one unit rather
-       than each panel scrolling inside itself, which would nest scrollbars.
-       The padding/negative-margin pair is load-bearing: setting any overflow
-       value makes this a scroll container, which clips at the padding box -
-       and the collapse tab deliberately sits 19px OUTSIDE its panel, so it
-       was being clipped away entirely (verified: the tab's own centre
-       hit-tested to the globe canvas behind it). The padding extends the clip
-       box past the tab; the matching negative margin cancels the layout
-       shift, so nothing moves. */
-    max-height: calc(100vh - 190px);
-    overflow-y: auto; overflow-x: hidden;
-    padding-right: 24px; margin-right: -24px;
+    /* Deliberately NOT a scroll container on desktop.
+       Setting any overflow value here makes it one, and a scroll container
+       clips everything to its padding box - including the collapse tab,
+       which sits outside its panel by design. An earlier attempt capped the
+       height here and papered over the clipping with a padding/negative-
+       margin pair on the right edge. That fixed the tab while the panel was
+       OPEN and broke it completely once collapsed, because a collapsed panel
+       translates LEFT, out through the opposite edge, where no amount of
+       right-hand padding helps: the tab became unclickable and the panel
+       could not be brought back.
+       The height cap isn't needed here anyway now that the left panel is
+       ~100px rather than ~400px. Mobile still caps it (see the media query),
+       where the tabs are hidden and clipping costs nothing. */
   }
   /* Chrome's default scrollbar is a wide opaque strip that reads as a bug
      against a translucent dark panel. */
@@ -422,7 +422,9 @@
        stays visible - without this the hotspot list ran underneath it. */
     #leftStack {
       top: 62px; left: 16px; max-width: calc(100vw - 32px);
-      max-height: calc(100vh - 250px);
+      /* Safe to clip here: the pull tabs are display:none on mobile, so
+         nothing lives outside the panels' own boxes. */
+      max-height: calc(100vh - 250px); overflow-y: auto;
     }
     #continentPanel, #optimizePanel { display: none; max-width: calc(100vw - 32px); }
     /* The stack scrolls as a whole on mobile, so the panel inside it must not
@@ -550,7 +552,7 @@
   <div class="sliderRow">
     <div class="rowTop">
       <span>Strength</span>
-      <span id="predictionStrengthLabel">2: Hourly wind</span>
+      <span id="predictionStrengthLabel">Wind as it shifts</span>
     </div>
     <input type="range" class="rangeSlider" id="predictionStrengthSlider" min="1" max="4" step="1" value="2" />
   </div>
@@ -1172,6 +1174,23 @@ let predictionPaths = [];
 let lastRenderedFires = [];
 let lastClusters = [];
 
+// Weakest first, so the fiercest fires end up LAST in the buffer.
+//
+// The markers are one THREE.Points cloud with depthWrite off, which means
+// they paint in array order and whatever comes last wins an overlap. Zooming
+// in doesn't re-place markers, so clusters drift over each other, and the
+// order they arrived in decided which was visible - a 4 MW smoulder could
+// sit on top of a 400 MW fire purely by luck of position in the list. Sorted
+// this way the answer is always "the worse fire".
+//
+// Sorted HERE, where the cluster set changes, rather than inside
+// updateFireSprites: that runs every frame during the prediction playback
+// animation, and re-sorting 40,000 markers per frame to get an order that
+// hasn't changed would be a real cost for nothing.
+function sortBySeverity(markers) {
+  return markers.slice().sort((a, b) => a.totalFrp - b.totalFrp);
+}
+
 function renderFireMarkers(fires, altitudeOverride) {
   lastRenderedFires = fires;
   // Mid-flyTo, the live camera altitude is an in-between value, not the
@@ -1180,14 +1199,14 @@ function renderFireMarkers(fires, altitudeOverride) {
   const altitude = altitudeOverride ?? world.pointOfView().altitude;
   const gridDeg = gridForAltitude(altitude);
   currentZoomTier = gridDeg;
-  lastClusters = clusterFires(fires, gridDeg);
+  lastClusters = sortBySeverity(clusterFires(fires, gridDeg));
   updateFireSprites(lastClusters);
 }
 
 // For fires the backend already aggregated (see loadFires' `grid` param) -
 // already in clusterFires()'s output shape, so no client-side re-clustering.
 function renderPreClusteredMarkers(clusters) {
-  lastClusters = clusters;
+  lastClusters = sortBySeverity(clusters);
   updateFireSprites(lastClusters);
 }
 
@@ -1818,11 +1837,17 @@ function predictionHours() {
 // How much goes into the spread model, from a quick current-wind snapshot
 // up to hourly wind + terrain + humidity. Each tier costs more requests, so
 // it's opt-in rather than always running at full strength.
+// Named for what each tier actually feeds into the projection, rather than
+// how good it claims to be. "Basic" and "Max accuracy" told someone where a
+// tier sat on a scale but nothing about the difference between them, and
+// "+Terrain" only made sense if you already knew what the previous tier did.
+// These read as a sentence: wind now -> wind as it changes -> plus the
+// ground it's crossing -> plus the weather driving it.
 const PREDICTION_STRENGTH_LABELS = {
-  1: '1: Basic',
-  2: '2: Hourly wind',
-  3: '3: +Terrain',
-  4: '4: Max accuracy',
+  1: 'Wind now',
+  2: 'Wind as it shifts',
+  3: 'Wind + terrain',
+  4: 'Wind, terrain + weather',
 };
 function predictionStrength() {
   return +predictionStrengthSlider.value;
@@ -2945,7 +2970,7 @@ async function updateAddressAirQuality(lat, lng) {
     // same here as it does on the globe.
     addressAirLine.innerHTML =
       `<span class="aqiDot" style="background: rgb(${cat.color.join(',')})"></span>` +
-      `Air quality: ${cat.name} (US AQI ${Math.round(reading.us_aqi)}${pm})`;
+      `Air quality: ${cat.name} (US AQI ${formatAqi(reading.us_aqi)}${pm})`;
   } catch (err) {
     // Same reasoning - silence beats a guess.
   }
@@ -3430,6 +3455,16 @@ function aqiCategory(aqi) {
   return AQI_CATEGORIES.find(c => aqi <= c.max) || AQI_CATEGORIES[AQI_CATEGORIES.length - 1];
 }
 
+// The US AQI scale is defined up to 500 and stops there. The provider will
+// happily extrapolate past it - a Siberian fire measured 1,292 µg/m³ PM2.5
+// and came back as "AQI 1388", a number that doesn't exist on the scale it
+// claims to be on. Anything beyond the top is shown as "500+", which is both
+// true and still conveys that it's off the chart.
+const AQI_SCALE_MAX = 500;
+function formatAqi(aqi) {
+  return aqi > AQI_SCALE_MAX ? `${AQI_SCALE_MAX}+` : String(Math.round(aqi));
+}
+
 // PM2.5 -> US AQI, using the EPA's 2024 revised breakpoints. Needed because
 // only the plume's SOURCE has a measured AQI from the API; every point
 // downwind has a modelled PM2.5 that still has to be expressed on the same
@@ -3761,7 +3796,9 @@ async function runSmokeAnalysis(centre) {
       const wantsArrows = i < SMOKE_ARROW_MAX_PLUMES ? arrows : null;
       bands.push(smokeBandFor(centreline, sourcePm25, sourceRadiusKm, wantsArrows));
       if (!strongest || source.totalFrp > strongest.source.totalFrp) {
-        strongest = { source, steps, centreline, sourcePm25 };
+        // sourceAqi is the provider's OWN published AQI for this point, kept
+        // alongside the raw PM2.5 - see the note where it's displayed.
+        strongest = { source, steps, centreline, sourcePm25, sourceAqi: airResults[i]?.us_aqi ?? null };
       }
     });
 
@@ -3782,11 +3819,17 @@ async function runSmokeAnalysis(centre) {
       return;
     }
 
-    const sourceAqi = pm25ToAqi(strongest.sourcePm25);
+    // The provider's published AQI, NOT one derived here from the current
+    // PM2.5. The US AQI is defined on an averaging window, so pushing an
+    // instantaneous reading through its breakpoints gives a different number
+    // than the official one - measured at a Ukrainian fire, 14 µg/m³ derived
+    // to ~55 where the published figure was 69. We already fetch the real
+    // one; deriving our own was simply using the wrong input.
+    const sourceAqi = strongest.sourceAqi != null ? Math.round(strongest.sourceAqi) : pm25ToAqi(strongest.sourcePm25);
     const cat = aqiCategory(sourceAqi);
     lines.push(
       `<p><span id="smokeAqiBadge" style="background: rgb(${cat.color.join(',')})">` +
-      `AQI ${sourceAqi} · ${cat.name}</span></p>`,
+      `AQI ${formatAqi(sourceAqi)} · ${cat.name}</span></p>`,
       `<p>Measured at the fire: <strong>${strongest.sourcePm25.toFixed(0)} µg/m³</strong> PM2.5</p>`
     );
 
@@ -3802,13 +3845,18 @@ async function runSmokeAnalysis(centre) {
 
     // A couple of concrete distances, because "the plume is 400km long" says
     // nothing about whether being under it matters.
+    // Quoted as modelled PM2.5, which is what the model actually produces,
+    // with the severity band alongside it. It deliberately does NOT quote a
+    // downwind "AQI ~359": that would put a made-up number on the same scale
+    // as the measured one right above it, implying an equivalence the model
+    // can't support.
     const samples = [50, 150, 300].filter(d => d <= end.distanceKm);
     if (samples.length) {
       const parts = samples.map(d => {
-        const aqi = pm25ToAqi(smokePm25At(strongest.sourcePm25, d));
-        return `${d} km: AQI ~${aqi} (${aqiCategory(aqi).name.toLowerCase()})`;
+        const pm = smokePm25At(strongest.sourcePm25, d);
+        return `${d} km: ~${pm.toFixed(0)} µg/m³ (${aqiCategory(pm25ToAqi(pm)).name.toLowerCase()})`;
       });
-      lines.push(`<p>Downwind — ${parts.join('; ')}</p>`);
+      lines.push(`<p>Modelled downwind PM2.5 — ${parts.join('; ')}</p>`);
     }
 
     const crossed = countriesAlong(strongest.centreline);
