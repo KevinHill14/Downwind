@@ -526,7 +526,7 @@
   <hr class="panelRule" />
   <h2 class="panelTitle">Spread prediction</h2>
   <div class="switchRow">
-    <span>Show predictions</span>
+    <span>Toggle predictions</span>
     <label class="switch">
       <input type="checkbox" id="predictionToggle" checked />
       <span class="slider"></span>
@@ -536,7 +536,7 @@
        prediction is computed, not an independent feature - so this row is
        hidden entirely while Prediction is off (see syncMonteCarloAvailability). -->
   <div class="switchRow" id="monteCarloRow">
-    <span>Monte Carlo</span>
+    <span>Show uncertainty</span>
     <label class="switch">
       <input type="checkbox" id="monteCarloToggle" />
       <span class="slider"></span>
@@ -629,7 +629,7 @@
     <span class="headerTitle" id="smokePanelTitle">Where&#8217;s the smoke going?</span>
     <button id="smokePanelClose" class="closeBtn" title="Close">&times;</button>
   </div>
-  <p id="smokeHint">Click anywhere on the globe. This finds the fires around that spot and shows where the wind will carry their smoke over the next 24 hours.</p>
+  <p id="smokeHint">Click anywhere on the globe. This finds the fires around that spot and shows where the wind will carry their smoke over the next 48 hours.</p>
   <div class="sliderRow">
     <div class="rowTop">
       <span>Search radius</span>
@@ -2432,9 +2432,10 @@ async function runCountryPredictions(country, fires) {
   // Spells out what the cyan shape means - without this the footprint is
   // just an unexplained blob next to a fire.
   const mcNote = mcOn && mcSampledTargets > 0
-    ? `<p><span class="mcSwatch"></span>Monte Carlo: ${MONTE_CARLO_SAMPLES} wind scenarios per fire.
-       The cyan area covers everywhere they landed - wide means the wind could
-       genuinely go several ways, tight means the projection is confident.</p>`
+    ? `<p><span class="mcSwatch"></span>${MONTE_CARLO_SAMPLES} wind scenarios per fire, varied inside
+       the forecast's own margin of error. The cyan area covers everywhere they
+       landed - wide means the wind could genuinely go several ways, tight means
+       the projection is confident.</p>`
     : '';
   const projectedNote = projectedCount === targets.length
     ? `all ${plural(targets.length, 'marker')}`
@@ -3207,17 +3208,17 @@ async function checkAddressRisk() {
       // no fires in range there was nothing to simulate, and claiming
       // scenarios were run would overstate what was actually checked.
       addressProbabilityLine.textContent = monteCarloEnabled()
-        ? 'Monte Carlo: no fires close enough to simulate'
+        ? 'No fires close enough to simulate'
         : '';
     } else {
       const pct = n => Math.round((n / mcScenarioCount) * 100);
       if (mcWatchCount === 0) {
         addressProbabilityLine.textContent =
-          `Monte Carlo: no fire reached you in any of ${mcScenarioCount} wind scenarios`;
+          `No fire reached you in any of ${mcScenarioCount} wind scenarios`;
       } else {
         const parts = [`${pct(mcWatchCount)}% of ${mcScenarioCount} wind scenarios bring a fire within watch range`];
         if (mcDangerCount > 0) parts.push(`${pct(mcDangerCount)}% within danger range`);
-        addressProbabilityLine.textContent = `Monte Carlo: ${parts.join(', ')}`;
+        addressProbabilityLine.textContent = `${parts.join(', ')}`;
         if (escalatedByMonteCarlo) {
           addressProbabilityLine.textContent +=
             ' - rating raised accordingly, the single most likely wind alone would have read lower';
@@ -3495,7 +3496,13 @@ function pm25ToAqi(pm) {
 // Scoped to a circle the user draws rather than run globally, which is what
 // makes it cheap: only the fires inside get looked at, so the whole thing is
 // four requests regardless of how much of the world is burning.
-const SMOKE_PLUME_HOURS = 24;
+// 48h rather than 24h. The concentration model keeps a strong plume visible
+// out to roughly 1200 km and a moderate one to ~750 km, but 24h of typical
+// wind only carries smoke ~430 km - so the plume was being cut off while it
+// still had visible smoke in it, not because it had faded. Costs nothing:
+// the wind forecast is one request either way (Open-Meteo returns 7 days),
+// and it doubles a per-plume segment count that starts at 24.
+const SMOKE_PLUME_HOURS = 48;
 // Every distinct fire group in the circle gets its own plume, not just the
 // strongest few - overlapping plumes compound into a darker, wider mass,
 // which is what actually happens, and a single plume from the biggest fire
@@ -3540,7 +3547,9 @@ const SMOKE_MAX_ALPHA = 0.55;
 const SMOKE_THIN_RGB = [175, 170, 163];
 const SMOKE_THICK_RGB = [26, 23, 21];
 // How often a direction chevron is dropped along a plume, in hours of travel.
-const SMOKE_ARROW_EVERY_HOURS = 8;
+// Raised alongside the doubled plume length so the chevron count per plume
+// stays about where it was rather than doubling into a dotted line.
+const SMOKE_ARROW_EVERY_HOURS = 12;
 // Arrows go on the strongest plumes only. Every source getting them turned
 // the overlap into a thicket of chevrons that read as scribble - a handful
 // is enough to establish which way the whole mass is drifting.

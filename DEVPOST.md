@@ -28,11 +28,11 @@ We wanted to build the thing that answers all three.
 
 **Fire spread prediction**, at four increasing tiers of accuracy — from a single wind reading up to hourly wind that bends the projected path, terrain that biases spread uphill and downhill, and humidity, temperature and rainfall factored into how fast it moves.
 
-**Monte Carlo uncertainty.** A single projected line quietly implies the forecast wind is exact. Toggle this on and the same spread maths runs 32 times per fire with the wind perturbed inside its real forecast error, and the region those scenarios land in is drawn underneath. A tight shape means the projection is trustworthy. A wide one means it genuinely could go several ways.
+**Uncertainty, shown honestly.** A single projected line quietly implies the forecast wind is exact. Toggle this on and the same spread maths runs 32 times per fire with the wind perturbed inside its real forecast error, and the region those scenarios land in is drawn underneath. A tight shape means the projection is trustworthy. A wide one means it genuinely could go several ways.
 
-**"Am I in danger?"** — type any address and get a Safe / Watch / Danger verdict based on nearby fires *and their predicted spread*, with the nearest real threat's distance, confidence, and estimated time of arrival. With Monte Carlo on it reports how *often* a fire reaches you across sampled scenarios, and raises its own rating if enough of them come out worse than the single best guess.
+**"Am I in danger?"** — type any address and get a Safe / Watch / Danger verdict based on nearby fires *and their predicted spread*, with the nearest real threat's distance, confidence, and estimated time of arrival. With uncertainty on it reports how *often* a fire reaches you across sampled scenarios, and raises its own rating if enough of them come out worse than the single best guess.
 
-**Smoke forecasting.** Circle any region and it finds every fire inside, pulls the *measured* PM2.5 at the strongest ones, and projects where that smoke goes over the next 24 hours on forecast wind — drawn as a plume that is dark and opaque where the air is genuinely hazardous and fades to nothing where it has diluted back to background.
+**Smoke forecasting.** Circle any region and it finds every fire inside, pulls the *measured* PM2.5 at the strongest ones, and projects where that smoke goes over the next 48 hours on forecast wind — drawn as a plume that is dark and opaque where the air is genuinely hazardous and fades to nothing where it has diluted back to background.
 
 **A 7-day playback.** One day of detections is a scatter of dots. The same region played day by day shows a fire front actually moving across the ground.
 
@@ -107,7 +107,7 @@ It found the projection does **not** beat persistence. Digging into why turned u
 
 ## Submission checklist
 
-- [ ] Screenshots — the globe with predictions running; a Monte Carlo footprint; the smoke plume; the "Am I in danger?" result
-- [ ] Demo video (2–3 min): open globe → search a country → prediction + Monte Carlo → play animation → smoke check → address check
+- [ ] Screenshots — the globe with predictions running; an uncertainty footprint; the smoke plume; the "Am I in danger?" result
+- [ ] Demo video (2–3 min): open globe → search a country → prediction + uncertainty → play animation → smoke check → address check
 - [ ] Live URL + GitHub link
 - [ ] Confirm the live deploy is on the current commit before submitting
