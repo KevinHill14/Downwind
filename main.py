@@ -276,9 +276,12 @@ async def _refresh_world_fires() -> None:
 
 
 # What the frontend asks for on a first visit, with nothing touched: the
-# Detail level slider's default grid, "show small fires" off, "show minor
-# ground fires" on. Kept in sync with static/index.html - DETAIL_GRID_STEPS[3],
-# MIN_FRP_THRESHOLD, currentMinConfidence(), FIRE_ESTIMATE_GRID.
+# Detail level slider's default grid, "show small fires" off, and ground
+# fires unfiltered. Kept in sync with static/index.html -
+# DETAIL_GRID_STEPS[DETAIL_DEFAULT_INDEX], MIN_FRP_THRESHOLD,
+# currentMinConfidence(), currentMinHectares(), FIRE_ESTIMATE_GRID.
+# If the slider's default grid ever changes, change it here too or every
+# first page load silently goes back to being a cold build.
 _DEFAULT_VIEW_GRID = 0.5
 _DEFAULT_VIEW_MIN_FRP = 3.0
 _DEFAULT_VIEW_MIN_CONFIDENCE = "h"

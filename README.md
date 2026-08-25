@@ -85,11 +85,11 @@ A "Save image" button captures the globe exactly as it looks and adds a caption 
 Click any marker for its exact position, detection count, total and peak FRP, area burned (ground-sourced fires), confidence, and how recently it was detected — or, for a projected marker, its lead time and the wind driving it. Implemented by raycasting the existing batched marker cloud **on click only**; hover would mean hit-testing on every mouse move, which is what made an earlier attempt at this laggy.
 
 ### Country search & quick navigation
-Type-ahead country search flies the camera to the country and loads only fires inside its actual border (point-in-polygon filtered, not just a bounding box). Continent quick-look buttons jump the camera to a preset view.
+Type-ahead country search flies the camera to the country and loads only fires inside its actual border (point-in-polygon filtered, not just a bounding box), plus a Reset zoom button to get back to the whole world.
 
 ### Filters
 - **Show small fires** (off by default) — otherwise low-intensity/low-confidence detections are hidden to cut down on visual noise for a world-scale view.
-- **Show minor ground fires** (on by default) — Canada's ground-confirmed fires can be filtered by hectares burned, independent of the satellite FRP filter above.
+- **Detail level** — three steps (Sparse / Balanced / Max) controlling how aggressively nearby fires are grouped. Nothing is ever dropped; the slider only changes how coarse the grouping is.
 
 ### Loading behaviour
 The globe is handed over as soon as it exists rather than being held behind a loading screen. The map can be panned and zoomed immediately; only the controls that genuinely need world fire data (search, smoke check, history, the address check) dim until it lands, so a slow fetch reads as *"this part isn't ready yet"* rather than *"the site is broken"*.
@@ -206,7 +206,7 @@ These aren't environment variables — they're constants in the code, listed her
 
 | Constant | Value | Controls |
 |---|---|---|
-| `DETAIL_GRID_STEPS` | `[3.0 … 0.1]` | The 7 clustering-grid sizes (degrees) the Detail level slider steps through. |
+| `DETAIL_GRID_STEPS` | `[1.5, 0.5, 0.1]` | The 3 clustering-grid sizes (degrees) the Detail level slider steps through. The middle value is the default and **must** match `_DEFAULT_VIEW_GRID` in `main.py`, or every first page load goes back to being a cold build. |
 | `FRP_SCALE_REF` | 150 MW | The FRP value color intensity is normalized against. |
 | `CATASTROPHIC_FRP_THRESHOLD` | 450 MW (3× ref) | Threshold for the darkest/most severe marker color. |
 | `COUNTRY_LABEL_CAP` | 45 | Max country/water-body name labels rendered at once. |

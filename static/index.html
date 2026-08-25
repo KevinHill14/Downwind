@@ -63,7 +63,7 @@
   }
   .panelTitle + .panelTitle, * + .panelTitle { margin-top: 2px; }
 
-  /* Left-aligned list rows: Quick Look, country results, hotspot list. */
+  /* Left-aligned list rows: reset zoom, country results, hotspot list. */
   .listBtn {
     background: var(--surface); color: var(--text); border: none;
     border-radius: var(--radius-sm); padding: 7px 12px; text-align: left;
@@ -217,7 +217,7 @@
   #resetZoomBtn { background: #333; border: 1px solid #4d4d50; text-align: center; }
   #resetZoomBtn:hover { background: var(--accent); border-color: var(--accent); }
 
-  /* Leaderboard rows: the same shape as Quick Look's, but carrying a
+  /* Leaderboard rows: the same shape as the other list buttons, but carrying a
      severity swatch and a second line. */
   #hotspotList { display: flex; flex-direction: column; gap: 4px; }
   #hotspotList .listBtn {
@@ -385,11 +385,11 @@
   body.awaitingFires #status { animation: statusPulse 1.6s ease-in-out infinite; }
   @keyframes statusPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
-  /* Mobile-only Quick Look / Optimize toggle buttons; hidden on desktop. */
+  /* Mobile-only search / options toggle buttons; hidden on desktop. */
   .mobilePanelToggle { display: none; }
 
   /* ---- Phone/tablet ----------------------------------------------------
-     Quick Look and Options collapse behind toggle buttons and start closed;
+     Search and Options collapse behind toggle buttons and start closed;
      "Am I in danger?" stays visible since it's the core feature. */
   @media (max-width: 820px) {
     #disclaimerBar { display: none; }
@@ -488,7 +488,7 @@
     <p id="loadingSub">This takes ~10 seconds</p>
   </div>
 </div>
-<button id="continentToggle" class="mobilePanelToggle" title="Quick Look / search">&#127760;</button>
+<button id="continentToggle" class="mobilePanelToggle" title="Search">&#127760;</button>
 <button id="optimizeToggle" class="mobilePanelToggle" title="Display options">&#9881;</button>
 <div id="status" class="panel">Loading fire data...</div>
 <div id="optimizePanel" class="panel">
@@ -502,21 +502,14 @@
   <div class="sliderRow">
     <div class="rowTop">
       <span>Detail level</span>
-      <span id="fireCountLabel">Fine</span>
+      <span id="fireCountLabel">Balanced</span>
     </div>
-    <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="6" step="1" value="3" />
+    <input type="range" class="rangeSlider" id="fireCountSlider" min="0" max="2" step="1" value="1" />
   </div>
   <div class="switchRow">
     <span>Show small fires</span>
     <label class="switch">
       <input type="checkbox" id="smallFiresToggle" />
-      <span class="slider"></span>
-    </label>
-  </div>
-  <div class="switchRow">
-    <span>Show minor ground fires</span>
-    <label class="switch">
-      <input type="checkbox" id="minorGroundFiresToggle" checked />
       <span class="slider"></span>
     </label>
   </div>
@@ -575,18 +568,14 @@
 <div id="leftStack">
 <div id="continentPanel" class="panel">
   <button class="panelTab" id="continentTab" title="Hide this panel">&#8249;</button>
+  <!-- The seven continent jump buttons that used to live here are gone. They
+       took most of the left panel to do something dragging the globe already
+       does, the country search does it better and more precisely, and one of
+       them was Antarctica, which has essentially no wildfires and so always
+       flew to an empty globe. Reset Zoom stays: getting back to the whole
+       world after a search is genuinely hard to do by dragging. -->
   <div id="quickLookButtons">
-    <h2 class="panelTitle">Quick Look</h2>
-    <button class="listBtn" id="resetZoomBtn" data-lat="20" data-lng="0" data-alt="2.2">Reset Zoom</button>
-    <hr class="panelRule" />
-    <button class="listBtn" data-lat="1" data-lng="21" data-alt="1.8">Africa</button>
-    <button class="listBtn" data-lat="-82" data-lng="0" data-alt="1.8">Antarctica</button>
-    <button class="listBtn" data-lat="34" data-lng="100" data-alt="1.8">Asia</button>
-    <button class="listBtn" data-lat="-25" data-lng="133" data-alt="1.8">Australia</button>
-    <button class="listBtn" data-lat="54" data-lng="15" data-alt="1.8">Europe</button>
-    <button class="listBtn" data-lat="45" data-lng="-100" data-alt="1.8">North America</button>
-    <button class="listBtn" data-lat="-15" data-lng="-60" data-alt="1.8">South America</button>
-    <hr class="panelRule" />
+    <button class="listBtn" id="resetZoomBtn">Reset zoom</button>
   </div>
   <div id="countrySearchWrap" class="inputWrap needsFireData">
     <input type="text" class="textInput" id="countrySearch" placeholder="Search a country..." autocomplete="off" />
@@ -1229,18 +1218,21 @@ function currentMinConfidence() {
   return smallFiresToggle.checked ? null : 'h';
 }
 
-// Ground-sourced fires (Canada, see main.py) have a real hectares-burned
-// number, a separate axis from "Show small fires" (FRP-only). On (default)
-// shows everything; off restricts to fires >=40ha, matching what comparable
-// trackers like firerisk.ai actually surface.
-const MIN_GROUND_FIRE_HECTARES = 40;
-const minorGroundFiresToggle = document.getElementById('minorGroundFiresToggle');
+// Ground-sourced fires (Canada, see main.py) are always shown in full.
+//
+// This used to be a "Show minor ground fires" switch that could restrict
+// them to >=40 hectares. It was removed: the filter is Canada-only, its
+// label meant nothing without knowing that, and its "on" state - show
+// everything - was both the default and the right answer. It also predated
+// the performance work, when trimming markers still mattered; it doesn't
+// now. The server still accepts min_hectares, so the capability is there if
+// a reason to expose it ever turns up.
 function currentMinHectares() {
-  return minorGroundFiresToggle.checked ? null : MIN_GROUND_FIRE_HECTARES;
+  return null;
 }
 
 // Polled rather than event-driven: OrbitControls' 'change' event doesn't
-// reliably fire for world.pointOfView() tweens (Quick Look buttons, search
+// reliably fire for world.pointOfView() tweens (reset zoom, search
 // flyTo), only direct drag/scroll - polling works the same regardless of
 // how the camera moved. Labels are hidden for the whole duration of any
 // motion (drag or flyTo alike) and only rebuilt once the camera's been
@@ -1771,7 +1763,7 @@ countrySearch.addEventListener('input', () => {
   }
 });
 
-// Mobile only: tapping into the search box collapses Quick Look down to
+// Mobile only: tapping into the search box collapses the reset button down to
 // just the search box + results (see .searchMode in the CSS).
 countrySearch.addEventListener('focus', () => {
   if (!isMobile()) return;
@@ -2553,27 +2545,17 @@ world
   .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
   .showAtmosphere(true);
 
-// Scoped to the Quick Look block, not the whole panel. Every button in here
-// carries data-lat/lng/alt; the panel also contains the search-clear X and
-// the collapse tab, which have no coordinates and would fly the camera to
-// NaN if they were caught by this.
-document.querySelectorAll('#quickLookButtons button').forEach(btn => {
-  btn.addEventListener('click', () => {
-    // Reset Zoom is a full reset, not just a fly-to - clears the search box,
-    // any active prediction, and the status text back to the world count,
-    // same as the X. The other continent buttons just fly the camera.
-    if (btn.id === 'resetZoomBtn') {
-      clearCountrySearch();
-      return;
-    }
-    flyToPointOfView(
-      { lat: parseFloat(btn.dataset.lat), lng: parseFloat(btn.dataset.lng), altitude: parseFloat(btn.dataset.alt) },
-      1000
-    );
-  });
-});
+// Reset zoom is a full reset, not just a fly-to: it clears the search box,
+// any active prediction, and the status text back to the world count, the
+// same as the search box's X does.
+// (This used to be a loop over every button in the panel, reading
+// data-lat/lng/alt off each one to fly the camera. With the continent
+// buttons gone there is exactly one button and one behaviour, so the loop
+// and the dataset parsing went with them - along with the hazard that any
+// future button dropped into this block would silently be flown to NaN.)
+document.getElementById('resetZoomBtn').addEventListener('click', clearCountrySearch);
 
-// Mobile only - Quick Look/Optimize open one at a time. No-op on desktop
+// Mobile only - search/options open one at a time. No-op on desktop
 // (toggle buttons are display:none there).
 const continentPanelEl = document.getElementById('continentPanel');
 const optimizePanelEl = document.getElementById('optimizePanel');
@@ -2613,8 +2595,18 @@ makePanelTab('optimizeTab', optimizePanelEl, '&#8250;', '&#8249;');
 // Every fire worldwide is included, nothing capped by rank - the slider
 // only controls the server-side clustering grid coarseness (see
 // _cluster_fires in main.py). Only MIN_FRP_THRESHOLD ever excludes a fire.
-const DETAIL_GRID_STEPS = [3.0, 1.5, 1.0, 0.5, 0.3, 0.2, 0.1];
-const FIRE_COUNT_LABELS = ['Sparse', 'Coarse', 'Medium', 'Fine', 'Finer', 'Finest', 'Max'];
+// Three steps, not the seven it used to have. "Sparse / Coarse / Medium /
+// Fine / Finer / Finest / Max" asked people to distinguish between gradations
+// that have no meaning outside this code, to tune a value that is really a
+// rendering-cost knob. Three positions cover the same range end to end.
+//
+// The middle value MUST stay 0.5: it's the default, and the server pre-builds
+// exactly that response on its refresh timer (_DEFAULT_VIEW_GRID in main.py).
+// Changing it here without changing it there would quietly turn every first
+// page load back into a cold 29-second build.
+const DETAIL_GRID_STEPS = [1.5, 0.5, 0.1];
+const FIRE_COUNT_LABELS = ['Sparse', 'Balanced', 'Max'];
+const DETAIL_DEFAULT_INDEX = 1;
 const fireCountSlider = document.getElementById('fireCountSlider');
 const fireCountLabel = document.getElementById('fireCountLabel');
 
@@ -2702,11 +2694,6 @@ fireCountSlider.addEventListener('input', () => {
 fireCountSlider.addEventListener('change', loadFires);
 
 smallFiresToggle.addEventListener('change', () => {
-  if (inCountryView) return; // country search always shows full detail
-  loadFires();
-});
-
-minorGroundFiresToggle.addEventListener('change', () => {
   if (inCountryView) return; // country search always shows full detail
   loadFires();
 });
