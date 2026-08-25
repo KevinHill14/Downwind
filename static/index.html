@@ -3692,6 +3692,27 @@ function smokePm25At(sourcePm25, distanceKm) {
   return SMOKE_BACKGROUND_PM25 + excess * dilution * deposition;
 }
 
+// How far above clean air the model has to be before quoting a figure is
+// honest. Below this the plume is inside the noise of ordinary air, and
+// printing "~5 µg/m³ (good)" at three distances implies a precision the model
+// does not have while telling the reader nothing they can act on.
+const SMOKE_NOTICEABLE_PM25 = 1.5;
+
+// Distance at which the plume has thinned back to ordinary air. The decay is
+// monotonic, so a coarse forward scan finds it without inverting the
+// dilution/deposition product. Returns null when it is still noticeable at
+// the end of the modelled plume, since claiming a number past that point
+// would be extrapolating beyond what was actually computed.
+function smokeClearDistanceKm(sourcePm25, maxKm) {
+  const STEP_KM = 10;
+  for (let d = 0; d <= maxKm; d += STEP_KM) {
+    if (smokePm25At(sourcePm25, d) - SMOKE_BACKGROUND_PM25 < SMOKE_NOTICEABLE_PM25) {
+      return Math.round(d / STEP_KM) * STEP_KM;
+    }
+  }
+  return null;
+}
+
 // Cross-sections perpendicular to the local direction of travel, widening
 // with distance. Alpha tracks how unhealthy the air is rather than just
 // fading with distance, so a plume that stays dangerous a long way out
@@ -3879,10 +3900,13 @@ async function runSmokeAnalysis(centre) {
     const end = strongest.centreline[strongest.centreline.length - 1];
     const travelBearing = bearingBetween(
       strongest.source.lat, strongest.source.lng, end.lat, end.lng);
-    const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    // Spelled out rather than abbreviated. "Carried N" makes a reader stop and
+    // decode a compass point in the middle of a sentence about their air.
+    const COMPASS = ['north', 'north-east', 'east', 'south-east',
+                     'south', 'south-west', 'west', 'north-west'];
     const heading = COMPASS[Math.round(travelBearing / 45) % 8];
     lines.push(
-      `<p>Carried <strong>${heading}</strong>, reaching about ` +
+      `<p>Blowing <strong>${heading}</strong>, reaching about ` +
       `<strong>${Math.round(end.distanceKm)} km</strong> in ${SMOKE_PLUME_HOURS}h</p>`
     );
 
@@ -3893,22 +3917,40 @@ async function runSmokeAnalysis(centre) {
     // downwind "AQI ~359": that would put a made-up number on the same scale
     // as the measured one right above it, implying an equivalence the model
     // can't support.
-    const samples = [50, 150, 300].filter(d => d <= end.distanceKm);
+    // Only distances where the modelled air still differs from clean air are
+    // worth printing. A weak source sits at background from the very first
+    // step, which used to render as "50 km: ~5 (good); 150 km: ~5 (good);
+    // 300 km: ~5 (good)" - three identical numbers dressed up as a
+    // measurement, telling the reader nothing except that we ran a model.
+    const excessAt = d => smokePm25At(strongest.sourcePm25, d) - SMOKE_BACKGROUND_PM25;
+    const samples = [50, 150, 300].filter(d => d <= end.distanceKm && excessAt(d) >= SMOKE_NOTICEABLE_PM25);
     if (samples.length) {
       const parts = samples.map(d => {
         const pm = smokePm25At(strongest.sourcePm25, d);
-        return `${d} km: ~${pm.toFixed(0)} µg/m³ (${aqiCategory(pm25ToAqi(pm)).name.toLowerCase()})`;
+        return `${d} km ~${pm.toFixed(0)} µg/m³ (${aqiCategory(pm25ToAqi(pm)).name.toLowerCase()})`;
       });
-      lines.push(`<p>Modelled downwind PM2.5 — ${parts.join('; ')}</p>`);
+      lines.push(`<p>Estimated PM2.5 downwind: ${parts.join('; ')}</p>`);
+      // Where it stops mattering is the more useful number of the two, and
+      // it's the one a reader actually wants: "does this reach me or not".
+      const clearKm = smokeClearDistanceKm(strongest.sourcePm25, end.distanceKm);
+      if (clearKm !== null) {
+        lines.push(`<p>Thins back to normal air after about <strong>${clearKm} km</strong>.</p>`);
+      }
+    } else {
+      lines.push('<p>This smoke is thin enough that it blends into normal air almost immediately.</p>');
     }
 
     const crossed = countriesAlong(strongest.centreline);
     if (crossed.length > 1) lines.push(`<p>Passes over: ${crossed.join(', ')}</p>`);
 
+    // Aimed at what the reader should DO with this, rather than at how it was
+    // computed. The old version led with the method ("modelled from one
+    // measured reading and the forecast wind"), which is the part that matters
+    // to whoever wrote it and the part a worried reader skips.
     lines.push(
-      '<p class="smokeCaveat">Concentrations downwind are modelled from one measured ' +
-      'reading at the fire and the forecast wind - a rough guide to where smoke goes, ' +
-      'not a substitute for a local air quality monitor.</p>'
+      '<p class="smokeCaveat">The reading at the fire is real. The downwind figures are ' +
+      'estimates from the wind forecast, so treat them as a guide to which way the smoke ' +
+      'is heading. For the air where you actually are, check a local monitor.</p>'
     );
     smokeResult.innerHTML = lines.join('');
     renderSmokeScale();
