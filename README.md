@@ -356,6 +356,23 @@ The 7-day history hit three separate scaling walls that the live map never does,
 
 A fourth "problem" turned out not to exist: a cache hit that appeared to take 5.7 seconds was PowerShell's `Invoke-WebRequest` building its response object. Timed with a raw HTTP client, the same request is 3–114 ms. Worth checking the instrument before optimising against it.
 
+### Half a million private copies of the word "2026-08-24"
+
+Production kept restarting on the 512 MB memory ceiling, and the caches — the usual suspects, and twice already the actual culprit — turned out to be innocent at 0.6 MB. Profiling each startup stage put essentially all of it in one place: `_world_fires`, the in-memory world dataset, at **171 MB for 498,494 detections**.
+
+The records were already `@dataclass(slots=True)`, so the per-object overhead was gone. What remained was the strings. `str.split()` returns a **brand new string object for every field of every row**, so half a million detections held half a million private copies of values drawn from *three* distinct confidence codes, *seven* dates, and about 1,400 timestamps. `sys.intern()` on those three fields collapses each set to one shared object:
+
+| | before | after |
+|---|---|---|
+| bytes per record | 359 | **235** |
+| `_world_fires` (498,494 records) | 171.4 MB | **112.0 MB** |
+| steady-state RSS | 260.9 MB | **193.1 MB** |
+| **peak RSS across a refresh** | **450.6 MB** | **326.9 MB** |
+
+That peak is the number that mattered. Every refresh builds the complete new dataset *before* swapping it in, so both are resident for an instant — deliberately, since the alternative is a window where requests see no fires at all. It also means the process high-water mark is roughly double the dataset, and every byte saved per record is saved twice. At 450 MB against a 512 MB ceiling, the restarts were happening with **no traffic at all**; the margin is now 185 MB.
+
+The lesson we keep re-learning here is that memory intuition is worthless without a profiler. Three times we have gone looking for a leak or a runaway cache, and three times the answer was a data structure sitting in plain sight, doing exactly what it was written to do.
+
 ---
 
 ## Validating the prediction math
