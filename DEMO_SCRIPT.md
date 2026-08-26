@@ -14,11 +14,11 @@ Read this out loud once before recording. Anywhere it feels like a sentence you 
 
 > **[Screen: the globe, slowly rotating, no panels open]**
 
-"In 2023, smoke from Canadian wildfires turned the sky over New York orange. The nearest fire was more than a thousand kilometres away.
+"In 2023 and again in 2026, smoke from Canadian wildfires turned the sky over New York and Southern Ontario orange. Yet the nearest fire was more than a thousand kilometres away.
 
 Every wildfire map I could find would have told those people they were safe. Technically they were right. There was no fire near them. There was just air they could not breathe.
 
-This is Downwind."
+So I made Downwind."
 
 ---
 
@@ -28,7 +28,7 @@ This is Downwind."
 
 "Every dot is a real fire, burning right now. About a hundred thousand active detections worldwide, pulled from three NASA satellites and refreshed every ten minutes.
 
-Colour is intensity, from small brush fires in yellow up to catastrophic in deep red. And the whole world is already in memory on the server, so panning around is instant. Nothing here is a stock dataset. This is the planet this morning."
+Colour is intensity, from small brush fires in yellow up to catastrophic in deep red. And the whole world is already in memory on the server, so panning around is instant. Nothing here is a stock dataset. This is the planet this exact moment."
 
 ---
 
@@ -36,13 +36,13 @@ Colour is intensity, from small brush fires in yellow up to catastrophic in deep
 
 > **[Search "Portugal". Let the camera fly. Predictions draw automatically.]**
 
-"Search a country and it projects where those fires are heading, using real wind forecast data. You can push that from a single wind reading up to hourly wind, terrain, and weather.
+"You can search a country and it projects where those fires are heading, using real wind forecast data. You can push that from a single wind reading up to hourly wind, terrain, and weather by using this slider.
 
 **[Toggle "Show uncertainty" on. Point at the cyan.]**
 
-But a single line implies the forecast is exact, and it never is. So this re-runs the whole projection thirty-two times with the wind varied inside its real margin of error. The cyan is everywhere the fire could still reach.
+But a single line implies the forecast is exact, and it never is. So this toggle re-runs the whole projection thirty-two times with the wind varied inside its real margin of error. The cyan is everywhere the fire could still reach.
 
-Wide means the wind could genuinely go several ways. Tight means you can trust it. I would rather show you an honest blob than a confident line that is wrong."
+Wider cones mean the wind could genuinely go several directions. Tighter cones mean you can trust it. But I would rather show you an honest blob than a confident line that is wrong."
 
 ---
 
@@ -66,19 +66,19 @@ Now flip that whole picture upside down."
 
 "The fire is the sun. The satellite is you. And the smoke is the cloud.
 
-Satellites find fires by looking for heat from orbit, straight down. But a big, well-established fire makes an enormous amount of smoke, and that smoke sits directly between the fire and the satellite.
+Satellites find fires by looking for heat from orbit. But a big, well-established fire makes an enormous amount of smoke, and that smoke sits directly between the fire and the satellite.
 
-So the blind spot gets worse exactly as the fire gets more serious. The fires most worth showing you are the ones most likely to be missing."
+So the blind spot gets worse exactly as the fire gets more severe. The fires most worth showing you are the ones most likely to be missing."
 
 > **[Back to the app. Canada on screen. Hit "Replay the last 7 days".]**
 
-"I found this because my own replay was lying to me. Playing back Canada, the fires appeared to be thinning out over the week. They were actually intensifying.
+"I found this by comparing government maps to my map of Canada, and also knowing there were bad wildfires. It was evident something was wrong.
 
 The fix was Canada's ground crews. Natural Resources Canada publishes every agency-reported fire with a validity window, so you can ask what was confirmed burning on a past day.
 
-**[Point at the day counter showing the ground split.]**
+**[Cut to your two screenshots: satellite-only first, then with the ground data merged in.]**
 
-On the smokiest days in eastern Canada, three quarters of the fire activity came from those ground reports. Satellite-only, I was showing about a third of reality."
+In conclusion, Canada went from this (Screenshot), to this (Screenshot) and it aligned with government maps too.
 
 ---
 
@@ -88,13 +88,13 @@ On the smokiest days in eastern Canada, three quarters of the fire activity came
 
 "Which brings me back to the reason I built this.
 
-Circle any region and it finds every fire inside, reads the real measured PM2.5 at the strongest ones, and projects where that smoke goes over the next forty-eight hours on forecast wind.
+You can circle any region and it finds every fire inside, reads the measured PM2.5 at the strongest fires, and projects where that smoke goes over the next forty-eight hours using forecast wind.
 
-The plume is dark where the air is genuinely dangerous and fades out where it has diluted back to normal. So you can see the shape of the thing that actually reaches people.
+The plume is dark where the air is genuinely dangerous and fades out where it has diluted back to normal.
 
 **[Type an address into "Am I in danger?" that is well away from any fire but downwind. Hit Check.]**
 
-And this is the question the whole project is built around. Type an address, and you get the fire verdict and the air quality separately. Because you can be perfectly safe from flame and still be breathing something you should not."
+And this is the question the whole project is built around. Am I safe? You can type an address, and you get the fire verdict and the air quality separately. Because you can be perfectly safe from flame and still be breathing something you should not."
 
 ---
 
@@ -102,11 +102,9 @@ And this is the question the whole project is built around. Type an address, and
 
 > **[Pull back out to the full globe. Let it rotate.]**
 
-"There is a lot more in here. Seven-day replay anywhere on Earth, a biggest-fires leaderboard, click any fire for detail, export any view as an image.
+"There is a lot more in here. Seven-day replay anywhere on Earth, a biggest-fires leaderboard, click any fire for detail, export any view as an image, along with many other config options to improve user experience.
 
-But the one thing I would want you to take away is this. Fire maps tell you where it is burning. Downwind tells you where it is going, and who is going to be breathing it.
-
-Thanks for watching."
+But the one thing I would want you to take away is this. Fire maps tell you where it is burning. Downwind tells you where it is going, and who is going to be breathing it."
 
 ---
 
