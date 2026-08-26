@@ -2437,9 +2437,17 @@ async function runCountryPredictions(country, fires) {
        the prediction.</p>`
     : '';
   // "marker" is what we call the dot in the code. On screen it is a fire.
+  //
+  // "all" here used to mean "all the fires we chose to project", which reads
+  // as "all the fires" directly under a line saying 10,823 were detected. In
+  // Canada that made 150 projections look like the whole country was covered,
+  // and made the ~10,700 markers without a line look like a bug. MAX_PREDICTIONS
+  // caps the work; the panel should say so rather than imply completeness.
+  const capped = targets.length < lastClusters.length;
   const projectedNote = projectedCount === targets.length
-    ? `all ${plural(targets.length, 'fire')}`
-    : `${projectedCount} of ${targets.length} fires`;
+    ? (capped ? `the ${targets.length} most intense` : `all ${plural(targets.length, 'fire')}`)
+    : (capped ? `${projectedCount} of the ${targets.length} most intense`
+              : `${projectedCount} of ${targets.length} fires`);
   predictionInfo.innerHTML = `
     <p>${plural(fires.length, 'active fire')} detected in ${country.name}</p>
     <p>Projected ${describeHours(hours)} ahead for ${projectedNote}</p>
