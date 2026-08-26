@@ -2136,7 +2136,7 @@ async function runCountryPredictions(country, fires) {
     .sort((a, b) => b.totalFrp - a.totalFrp)
     .slice(0, MAX_PREDICTIONS);
 
-  predictionInfo.innerHTML = `<p>Projecting ${describeHours(hours)} ahead for ${plural(targets.length, 'marker')} in ${country.name}...</p>`;
+  predictionInfo.innerHTML = `<p>Projecting ${describeHours(hours)} ahead for ${plural(targets.length, 'fire')} in ${country.name}...</p>`;
   // Open-Meteo can take 4-20s+ for the same request shape - a static
   // message with no feedback reads as frozen, so this ticks a live
   // elapsed-seconds counter instead.
@@ -2144,7 +2144,7 @@ async function runCountryPredictions(country, fires) {
   const progressIntervalId = setInterval(() => {
     const elapsedSec = Math.floor((Date.now() - predictionStartedAt) / 1000);
     const p = predictionInfo.querySelector('p');
-    if (p) p.textContent = `Projecting ${describeHours(hours)} ahead for ${plural(targets.length, 'marker')} in ${country.name}... (${elapsedSec}s)`;
+    if (p) p.textContent = `Projecting ${describeHours(hours)} ahead for ${plural(targets.length, 'fire')} in ${country.name}... (${elapsedSec}s)`;
   }, 1000);
 
   try {
@@ -2436,9 +2436,10 @@ async function runCountryPredictions(country, fires) {
        wind doesn't do exactly what's forecast. The wider it is, the less certain
        the prediction.</p>`
     : '';
+  // "marker" is what we call the dot in the code. On screen it is a fire.
   const projectedNote = projectedCount === targets.length
-    ? `all ${plural(targets.length, 'marker')}`
-    : `${projectedCount} of ${targets.length} markers`;
+    ? `all ${plural(targets.length, 'fire')}`
+    : `${projectedCount} of ${targets.length} fires`;
   predictionInfo.innerHTML = `
     <p>${plural(fires.length, 'active fire')} detected in ${country.name}</p>
     <p>Projected ${describeHours(hours)} ahead for ${projectedNote}</p>
@@ -2855,7 +2856,12 @@ function renderHotspots() {
       : c.name;
     const stats = document.createElement('span');
     stats.className = 'hotspotStats';
-    stats.textContent = `${Math.round(c.totalFrp).toLocaleString()} MW · ${c.count.toLocaleString()} detections`;
+    // Just the count. Megawatts meant nothing to a reader, but swapping in the
+    // severity word was worse: every entry in a top-five list clears the
+    // "catastrophic" threshold, so all five rows read identically and the list
+    // stopped ranking anything. The count varies, and the swatch beside it
+    // already carries severity by colour.
+    stats.textContent = plural(c.count, 'detection');
     text.append(name, stats);
 
     btn.append(swatch, text);
@@ -3345,11 +3351,11 @@ function showHistoryDay(index) {
   const day = historyData.days[index];
   if (!day) return;
   historyScrub.value = index;
-  // Ground-confirmed shown separately rather than folded into the total: on
-  // a smoky day over Canada it can be most of the number, and that split is
-  // the whole point of merging the two sources.
-  const groundNote = day.ground_count ? ` (${day.ground_count.toLocaleString()} ground)` : '';
-  historyDate.textContent = `${formatHistoryDate(day.date)} · ${day.raw_count.toLocaleString()}${groundNote}`;
+  // Which source a fire came from is our problem, not the viewer's. They came
+  // here to watch a week of fire move, and "(288 ground)" answers a question
+  // nobody watching an animation is asking.
+  historyDate.textContent =
+    `${formatHistoryDate(day.date)} · ${plural(day.raw_count, 'fire')}`;
   renderPreClusteredMarkers(day.fires);
 }
 
@@ -3439,10 +3445,6 @@ async function enterHistory() {
     // Said out loud rather than silently showing a smaller area than the one
     // the user was looking at.
     if (json.clipped) notes.push('area trimmed to fit');
-    // Worth stating: over Canada the ground-confirmed feed contributes the
-    // majority of the fires on some days, and it's the reason the replay
-    // doesn't appear to lose its biggest fires whenever smoke thickens.
-    if (json.has_ground_data) notes.push('incl. ground-confirmed');
     statusEl.textContent =
       `Last ${json.days.length} days (${span})${notes.length ? ' - ' + notes.join(', ') : ''}`;
     showHistoryDay(0);
@@ -3893,11 +3895,12 @@ async function runSmokeAnalysis(centre) {
     updateSmokePlume(bands);
     updateSmokeArrows(arrows);
 
-    const totalFrp = sources.reduce((sum, s) => sum + s.totalFrp, 0);
+    // Was "12,645 detections · 24 smoke sources · 43,842 MW". The source count
+    // is an internal grouping step, and megawatts of radiative power is a unit
+    // almost nobody can picture. What someone circling a region wants to know
+    // is how much is burning there; the severity of the air is the badge below.
     const lines = [
-      `<p class="smokeHeadline">${inCircle.length.toLocaleString()} detections · ` +
-      `${sources.length} smoke source${sources.length === 1 ? '' : 's'} · ` +
-      `${Math.round(totalFrp).toLocaleString()} MW</p>`,
+      `<p class="smokeHeadline">${plural(inCircle.length, 'fire')} burning in this area</p>`,
     ];
 
     if (!strongest) {
@@ -4075,6 +4078,13 @@ function newestDetectionAgeHours(marker) {
   return Number.isFinite(newest) ? newest : null;
 }
 
+// "48.203 N, 75.533 W" rather than "48.203, -75.533". Same precision, no
+// mental arithmetic to work out which hemisphere is being described.
+function formatLatLng(lat, lng) {
+  return `${Math.abs(lat).toFixed(3)} ${lat >= 0 ? 'N' : 'S'}, ` +
+         `${Math.abs(lng).toFixed(3)} ${lng >= 0 ? 'E' : 'W'}`;
+}
+
 function openFirePanel(marker) {
   const [r, g, b] = marker.faded ? fadeRgb(severityBucket(marker.totalFrp)) : severityBucket(marker.totalFrp);
   firePanelSwatch.style.background = `rgb(${r},${g},${b})`;
@@ -4085,10 +4095,14 @@ function openFirePanel(marker) {
   const rows = [];
   const add = (label, value) => { if (value !== null && value !== undefined) rows.push([label, value]); };
 
-  add('Location', `${marker.lat.toFixed(3)}, ${marker.lng.toFixed(3)}`);
+  // "FRP" is the satellite term for radiative power. It means nothing to
+  // anyone who has not read the NASA docs, so the rows say what the number
+  // describes instead. Signed decimals get compass letters for the same
+  // reason: -75.533 makes a reader work out which side of the world it is on.
+  add('Location', formatLatLng(marker.lat, marker.lng));
   if (marker.count > 1) add('Detections', marker.count.toLocaleString());
-  add('Total FRP', `${marker.totalFrp.toFixed(1)} MW`);
-  if (marker.count > 1) add('Peak FRP', `${marker.maxFrp.toFixed(1)} MW`);
+  add('Heat output', `${marker.totalFrp.toFixed(1)} MW`);
+  if (marker.count > 1) add('Hottest detection', `${marker.maxFrp.toFixed(1)} MW`);
 
   // Ground-sourced (CWFIS) fires carry real hectares; satellite ones don't.
   const hectares = marker.fires?.find(f => f.ha !== null && f.ha !== undefined)?.ha;
@@ -4111,7 +4125,7 @@ function openFirePanel(marker) {
   // their raw detections, so confidence/age genuinely aren't available
   // there - saying so beats silently omitting the rows.
   if (!marker.fires && !marker.predicted) {
-    firePanelNote.textContent = 'Search a country for per-detection confidence and timing.';
+    firePanelNote.textContent = 'Search a country to see how confident and how recent this is.';
   } else if (marker.predicted) {
     firePanelNote.textContent = 'Estimated position, not an observation.';
   } else {

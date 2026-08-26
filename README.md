@@ -92,7 +92,7 @@ The live map answers "what is burning now". This answers "which way has it been 
 
 Press **Replay the last 7 days** to fetch the week for whatever region is on screen, then play, pause, or drag the scrubber to any single day. Leaving playback restores the live view exactly.
 
-Over Canada it merges **ground-confirmed history** alongside the satellite record, reconstructed from CWFIS's time-series layer for each day. On smoky days the ground feed supplies most of the fire activity, because the biggest fires are the ones most likely to be hidden from a satellite by their own smoke. The day counter shows the split (`Aug 23 · 3,151 (288 ground)`).
+Over Canada it merges **ground-confirmed history** alongside the satellite record, reconstructed from CWFIS's time-series layer for each day. On smoky days the ground feed supplies most of the fire activity, because the biggest fires are the ones most likely to be hidden from a satellite by their own smoke. The day counter reads `Aug 23 · 3,151 fires`, with no breakdown by source: which feed a fire arrived on is an implementation detail, and nobody watching a week of fire move is asking it.
 
 ### Biggest fires right now
 
