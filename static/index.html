@@ -1827,7 +1827,25 @@ const predictionDaysSlider = document.getElementById('predictionDaysSlider');
 const predictionDaysLabel = document.getElementById('predictionDaysLabel');
 const predictionStrengthSlider = document.getElementById('predictionStrengthSlider');
 const predictionStrengthLabel = document.getElementById('predictionStrengthLabel');
-const MAX_PREDICTIONS = 150; // safety cap for pathological cases; take the most intense first
+// How many fire clusters get a projection. Raised from 150 because a country
+// the size of Canada has ~3,000 of them, so 150 lines scattered over 10,000
+// markers read as "predictions are broken" rather than "predictions are
+// capped".
+//
+// The outbound cost is far below the cap, because WIND_GRID_DEG collapses
+// every fire within ~30 km onto one wind lookup, and the backend then sends
+// those 40 at a time. Measured over Canada:
+//
+//    cap    distinct wind points    outbound chunks of 40
+//    150            83                       3
+//    500           311                       8
+//   1000           550                      14
+//
+// 500 was chosen over 1000 because the extra 500 fires are the weakest ones,
+// so it nearly doubles the outbound work for the least visible half of the
+// map. Readings are cached for 15 minutes, so rehearsing a demo repeatedly
+// costs nothing after the first run.
+const MAX_PREDICTIONS = 500;
 const WIND_GRID_DEG = 0.3; // wind is shared across markers within this grid cell (~30km) to limit API calls
 
 function predictionHours() {

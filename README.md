@@ -228,7 +228,8 @@ The server is ready almost immediately and real fire data populates in the backg
 | `CATASTROPHIC_FRP_THRESHOLD` | 450 MW | Threshold for the darkest marker colour. |
 | `COUNTRY_LABEL_CAP` | 45 | Max place-name labels rendered at once. |
 | `LABEL_VISIBILITY_FACTOR` | 6 | A label appears once camera altitude is within 6x that feature's natural framing altitude. |
-| `WIND_GRID_DEG` | 0.3° (~30 km) | Fire clusters within this distance share one wind lookup. |
+| `WIND_GRID_DEG` | 0.3° (~30 km) | Fire clusters within this distance share one wind lookup, which is what keeps the projection cheap. |
+| `MAX_PREDICTIONS` | 500 | Fire clusters given a projection, most intense first. Canada has ~3,000, so a low cap made predictions look broken rather than capped. Costs far less than the number suggests: 500 targets collapse to 311 distinct wind points, sent 40 at a time. |
 | `MONTE_CARLO_SAMPLES` | 32 | Wind scenarios simulated per fire when "Show uncertainty" is on. |
 | `MC_BEARING_SD_DEG` | 22° | Assumed scenario-level wind direction uncertainty. |
 | `MC_SPEED_SD_FRAC` | 0.28 | Assumed wind speed uncertainty (about ±28%). |
