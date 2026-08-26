@@ -159,8 +159,8 @@ The backend holds the *entire world's* fire data in memory, refreshed on a timer
 ### Setup
 
 ```bash
-git clone https://github.com/KevinHill14/fire_tracker.git
-cd fire_tracker
+git clone https://github.com/KevinHill14/Downwind.git
+cd Downwind
 
 python -m venv .venv
 .venv\Scripts\activate        # Windows
