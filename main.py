@@ -683,6 +683,7 @@ async def _fetch_canada_history(start_date, end_date) -> list[dict]:
         try:
             records.append(
                 {
+                    "id": cols[idx["national_fire_id"]].strip(),
                     "lat": float(cols[idx["latitude"]]),
                     "lng": float(cols[idx["longitude"]]),
                     # -1 is CWFIS's "size not known yet" sentinel, not a real area.
@@ -696,6 +697,57 @@ async def _fetch_canada_history(start_date, end_date) -> list[dict]:
     return records
 
 
+async def _fetch_canada_current_records() -> list[dict]:
+    """Today's active fires from the SAME feed the live map uses, shaped like
+    the versioned records above so the two can be unioned.
+
+    Needed because the versioned layer's per-fire history stops being updated
+    for several agencies while the fire is still burning. Measured 2026-08-26,
+    currently-active fires the versioned layer also had a record for today:
+
+        MB   2 of 142      NL   0 of 22       AB   0 of 12
+        QC  33 of 192      SK   7 of 48       BC   9 of 38
+        ON  82 of 178      NT 161 of 185      PC  21 of 25
+
+    So a replay built on the versioned layer alone was missing almost every
+    fire in Manitoba, which is precisely what the live map was showing. The
+    union recovers roughly 530 fires a day, close to doubling ground coverage.
+
+    These rows carry their own record_start/record_end (a fire reported on
+    16 July and still going reads 2026-07-16 to 2026-12-31), so they place
+    onto past days by the same validity-window test as the versioned ones and
+    need no special casing. What this source cannot supply is a fire that went
+    out earlier in the week, since it only lists what is burning now. The
+    versioned layer covers those, which is why both are fetched."""
+    resp = await _http_client.get(CANADA_FIRES_URL, timeout=20)
+    resp.raise_for_status()
+
+    lines = resp.text.strip().splitlines()
+    if len(lines) < 2:
+        return []
+    idx = {name.strip(): i for i, name in enumerate(lines[0].split(","))}
+
+    records = []
+    for line in lines[1:]:
+        cols = line.split(",")
+        try:
+            if cols[idx["stage_of_control_status"]].strip() not in CANADA_ACTIVE_STAGES:
+                continue
+            records.append(
+                {
+                    "id": cols[idx["national_fire_id"]].strip(),
+                    "lat": float(cols[idx["latitude"]]),
+                    "lng": float(cols[idx["longitude"]]),
+                    "ha": max(0.0, float(cols[idx["fire_size"]] or 0)),
+                    "start": _parse_cwfis_time(cols[idx["record_start"]]),
+                    "end": _parse_cwfis_time(cols[idx["record_end"]]),
+                }
+            )
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+    return records
+
+
 def _canada_fires_on_day(records: list[dict], day) -> list[Fire]:
     """The ground-confirmed fires burning on `day`, as Fire objects.
 
@@ -706,8 +758,18 @@ def _canada_fires_on_day(records: list[dict], day) -> list[Fire]:
     noon = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=12)
     day_str = day.isoformat()
     out = []
+    # The two CWFIS products overlap, so a fire present in both would otherwise
+    # be drawn twice and counted twice. Callers pass the versioned records
+    # first and those win, since they carry that day's actual reported stage
+    # and size rather than today's.
+    seen_ids: set[str] = set()
     for r in records:
         if r["start"] <= noon <= r["end"]:
+            fire_id = r.get("id")
+            if fire_id:
+                if fire_id in seen_ids:
+                    continue
+                seen_ids.add(fire_id)
             out.append(
                 Fire(
                     lat=r["lat"], lng=r["lng"],
@@ -940,7 +1002,25 @@ async def get_fires_history(
         async def canada_history():
             if not wants_ground:
                 return []
-            return await _fetch_canada_history(window[0], window[-1])
+            # Both CWFIS products. Neither is complete on its own: the
+            # versioned layer goes stale mid-fire for several agencies, and
+            # the current list cannot describe a fire that has already gone
+            # out. See _fetch_canada_current_records for the measured split.
+            # Versioned first, because _canada_fires_on_day lets the first
+            # record for a fire win and that one knows the stage on the day.
+            versioned, current = await asyncio.gather(
+                _fetch_canada_history(window[0], window[-1]),
+                _fetch_canada_current_records(),
+                return_exceptions=True,
+            )
+            records: list[dict] = []
+            for part, label in ((versioned, "reportedfires"), (current, "activefires")):
+                if isinstance(part, Exception):
+                    # One source failing still leaves usable ground data.
+                    print(f"[history] CWFIS {label} failed: {type(part).__name__}: {part}")
+                else:
+                    records.extend(part)
+            return records
 
         results = await asyncio.gather(
             *(

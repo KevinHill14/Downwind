@@ -311,12 +311,24 @@ One request covers the whole window and days are bucketed locally. I verified th
 
 How much it mattered, measured:
 
-| Region | Total detections/day | From ground reports |
-|---|---|---|
-| Quebec / Ontario | 159-215 | **116-138 (65-75%)** |
-| BC / Alberta (Aug 23-24) | 271-284 | **179-197 (66-70%)** |
+| Region | Satellite/day | Ground/day | Ground share |
+|---|---|---|---|
+| Quebec / Ontario | 37-74 | 451-456 | **86-92%** |
+| Manitoba | 8-53 | 111-113 | **68-93%** |
+| BC / Alberta | 73-2123 | 174-240 | **8-77%** |
 
-On the smokiest days in eastern Canada, roughly **three quarters** of fire activity came from ground reports. A satellite-only replay was showing about a third of reality.
+In eastern Canada the ground feed supplies the overwhelming majority of fire activity, and a satellite-only replay was showing well under a fifth of reality. BC and Alberta swing widely, since a clear day there produces thousands of satellite detections and a smoky one produces almost none, which is the blind spot restating itself.
+
+### One ground feed was not enough
+
+The numbers above are larger than the ones this section first carried, because the first version of this merge was itself incomplete. CWFIS publishes the same fires through two products, and the versioned layer that makes the time series possible **stops being updated mid-fire for several agencies**. Measured on 2026-08-26, currently-burning fires that the versioned layer also had a record for that day:
+
+| | | | | | |
+|---|---|---|---|---|---|
+| MB **2 of 142** | NL **0 of 22** | AB **0 of 12** | QC 33 of 192 | SK 7 of 48 | BC 9 of 38 |
+| ON 82 of 178 | NT 161 of 185 | PC 21 of 25 | YT 14 of 22 | NS 1 of 2 | NB 0 of 2 |
+
+Manitoba was the tell. The live map showed 112 fires there and the replay showed 3, which is what surfaced the bug. The replay now unions both products, deduplicated by `national_fire_id`, which recovers around 530 fires a day nationally. Neither product is sufficient alone: the versioned layer goes stale mid-fire, and the current list cannot describe a fire that has already gone out.
 
 ### Predictions, which took the most iteration by far
 
