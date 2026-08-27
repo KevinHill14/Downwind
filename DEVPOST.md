@@ -67,9 +67,17 @@ The pattern pointed at the source IP rather than at my own pacing. My request vo
 
 ### Accomplishments I am proud of
 
-**I built the tool that says my own model is not good enough.** `validate_predictions.py` takes fires as they were on a past day, re-runs the projection using the wind that actually blew, and compares it against the detections that followed. It scores against a persistence baseline of "predict the fire does not move", because fire detections cluster, so any prediction lands near some fire and raw error on its own means nothing.
+**I built the tool that says my own model is not good enough.** `validate_predictions.py` rewinds to a past day, re-runs the projection using the wind that actually blew, and checks it against the fires that actually showed up afterwards.
 
-It found that the projection does not beat persistence. Digging into why turned up something better than a tuned constant would have been: the ground truth itself is biased. Smoke blows downwind and hides fires from the satellite exactly there, so new detections skew upwind, 36 to 61 degrees off the reported wind where random would sit at 90. That is an artifact of how the data is collected rather than how fire behaves, and settling it properly needs mapped fire perimeters instead of point detections. I would rather ship that finding than quietly tune a number until the graph looked good.
+The hard part is scoring it fairly. Fires burn in clusters, so a projected marker dropped almost anywhere near a fire will land close to *some* real detection, and a small average error proves nothing on its own. So the script scores against the laziest forecast available: assume the fire does not move at all. Beating that is the only result that means anything.
+
+It does not beat it.
+
+Then the interesting part. I measured which direction fires actually grew and compared it against the wind. If growth were random, the average angle between the two would sit at about 90 degrees. It came out between 36 and 61, and it pointed the wrong way: new detections cluster on the *upwind* side of a fire.
+
+That turns out to be a fact about the satellite rather than about fire. Smoke drifts downwind and blocks the sensor's view of the ground beneath it, so downwind detections go missing and the surviving ones sit upwind. The data I am scoring against is therefore biased against the exact thing the model predicts, and no amount of tuning fixes that. Settling it properly needs mapped fire perimeters rather than individual hotspots.
+
+I would rather ship that finding than quietly adjust a constant until the graph looked better.
 
 **Every health number in the app is either measured or absent.** Wind, terrain and elevation all degrade gracefully when a provider fails, because an approximate wind direction only misaims a drawing on a globe. Air quality has no fallback anywhere in the codebase. If the measurement is missing, the line and the badge disappear rather than guess, because that is a number someone might act on.
 
