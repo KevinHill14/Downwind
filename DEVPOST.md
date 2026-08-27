@@ -43,6 +43,8 @@ Plus a biggest-fires leaderboard, click-any-fire detail, prediction playback ani
 
 **Hosting:** Render's free tier, whose 512 MB memory ceiling shaped a genuinely large share of the engineering decisions in this project.
 
+**Mobile:** one 820px breakpoint collapses the panels into icon-triggered overlays, and the JavaScript reads that same breakpoint back through `matchMedia` so the CSS and the code can never disagree about what mobile means. Image export hands the file to the native share sheet, which is where "Save Image" lives on a phone.
+
 Every fire marker on screen is one batched point-sprite draw call rather than thousands of individual objects, which is what keeps tens of thousands of them smooth on a phone.
 
 ### Challenges I ran into
@@ -54,6 +56,8 @@ Every fire marker on screen is one batched point-sprite draw call rather than th
 **Half of Siberia did not exist.** Point-in-polygon maths treats longitude as a flat number line. Russia's outline crosses the antimeridian, jumping from +180 to -180, which tears the shape in half in flat coordinates. Every fire in Siberia, some of the largest on Earth, tested as being inside no country at all, and searching "Russia" returned almost nothing. This was live and silent for weeks without throwing a single exception. It now returns 98,309 detections. The obvious one-line fix turned out to be worse than the bug itself, resolving New Delhi to Mexico and open Pacific ocean to Uganda.
 
 **Four out-of-memory restarts on a 512 MB box.** Three of them were the same mistake in three different places: caching assembled Python objects instead of compressed response bytes. The fourth was more interesting. Profiling put essentially all of the memory in the world dataset itself, where `str.split()` had given half a million detections their own private copies of values drawn from three confidence codes, seven dates and about 1,400 timestamps. Interning those three fields took the dataset from 171 MB to 112 MB and peak memory from 450 MB to 327 MB.
+
+**Two phone bugs that a desktop never shows.** Three.js defaults its renderer pixel ratio to the device's own, which is harmless on a laptop and punishing on a phone: a 3x-DPI screen pays roughly nine times the fragment-shading cost of a capped 2x one, for sharpness that is invisible on a sphere this size. Capping it was the single biggest win for drag and orbit smoothness anywhere in the app. The second took longer to find. OrbitControls ships with no zoom limits, so a fast pinch could dolly the camera straight through the globe's surface, and between the near clip plane and the mesh the entire view went black with no error to explain it. Both needed a real device to surface, because a mouse wheel cannot zoom fast enough to reproduce the second and a 1x display never pays for the first.
 
 **A 29-second first load.** Rather than guess, I timed every stage. Everyone's instinct for why clustering 455,000 fires is slow is the clustering, and the clustering was 10% of it. The real costs were a generic serializer doing unnecessary work and an entire expensive request that existed to display a single number while starving the request the user was actually waiting on. Cold load is now 0.39 seconds and the globe is interactive in under one.
 
