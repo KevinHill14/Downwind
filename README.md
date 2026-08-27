@@ -86,6 +86,8 @@ Both risks get their own badge: **FIRE: SAFE** beside **AIR: UNHEALTHY**. Report
 
 Unlike every wind endpoint, air quality has **no synthetic fallback**. A guessed wind direction misaims a drawing on a globe. A guessed air quality figure is a health number someone might act on. When the measurement is unavailable the line is omitted.
 
+Under the reading, **the next two days**. Smoke arrives on a schedule, so air that is clean at noon can be unhealthy by evening once a plume reaches you, and a snapshot tells somebody deciding whether to go out this evening nothing at all. This is one sentence rather than a chart, and it only speaks up when the AQI **category** changes, so a rise from 41 to 49 stays quiet while 41 to 55 reads *"Next 2 days: worsening to Unhealthy for sensitive groups (US AQI 113) around Fri 3 PM"*. Hours are rendered in the viewer's own timezone, which is why the endpoint returns epoch seconds rather than a formatted local string.
+
 With **Show uncertainty** on, the check also reports how often a fire reaches you across sampled wind scenarios, for example *"100% of 32 wind scenarios bring a fire within watch range, 6% within danger range"*. If a substantial share of scenarios land worse than the single best-guess wind, the rating is raised to match and says so. A one-in-three chance of danger should not display as a flat SAFE just because the most likely wind happens to miss.
 
 ### Last 7 days replay
@@ -135,6 +137,7 @@ If the server is still doing its own first fetch from NASA, `/api/fires` says so
 +-------------------------------+          |  /api/wind/forecast/batch    |
                                            |  /api/elevation/batch        |
                                            |  /api/air-quality/batch      |
+                                           |  /api/air-quality/forecast   |
                                            |  /api/geocode                |
                                            +------------------------------+
                                                            |
@@ -206,7 +209,8 @@ The server is ready almost immediately and real fire data populates in the backg
 | `WORLD_REFRESH_INTERVAL_SECONDS` | 10 min | How often the world's fire data is re-fetched. Matches FIRMS' own near-real-time cadence. |
 | `FORECAST_CACHE_TTL_SECONDS` | 15 min | How long a wind reading for a point is reused. |
 | `ELEVATION_CACHE_TTL_SECONDS` | 24 hr | Terrain cache. Long, since terrain does not change. |
-| `AIR_QUALITY_CACHE_TTL_SECONDS` | 30 min | Longer than wind because air quality is only published hourly. |
+| `AIR_QUALITY_CACHE_TTL_SECONDS` | 30 min | Longer than wind because air quality is only published hourly. Covers both the current reading and the forecast series. |
+| `AIR_QUALITY_FORECAST_HOURS` | 48 | How far ahead the address check looks. Long enough to answer "is tonight going to be bad" without becoming a weather report. |
 | `CACHE_EVICTION_INTERVAL_SECONDS` | 2 min | How often expired entries are swept out of memory. |
 | `MAX_BATCH_POINTS` | 1000 | Cap on points per wind/elevation/forecast request. |
 | `_WORLD_VIEW_CACHE_MAX_ENTRIES` | 8 | Max cached world-view responses (LRU). Bounds cache memory. An unbounded version of this caused an out-of-memory restart in production. |
@@ -259,6 +263,7 @@ All endpoints return JSON. None require auth from the browser, since the backend
 | `/api/fires` | GET | Fire data. `bbox`, `grid`, `min_frp`, `min_confidence`, `min_hectares` filter and cluster it. `count_only=1` returns just the counts. Returns `ready: false` if the server has not finished its first NASA fetch. |
 | `/api/fires/history` | GET | The last `days` (2-7) of detections in a region, split by day. `bbox` is required, since a whole-world week is far too much data. Oversized boxes are clipped around their centre and the response says so. Over Canada it merges CWFIS ground history (`has_ground_data`, per-day `ground_count`). |
 | `/api/air-quality/batch` | POST | Ground-level PM2.5 and US AQI for a list of points. Returns nulls rather than estimates where no measurement exists. |
+| `/api/air-quality/forecast` | GET | Hourly PM2.5 and US AQI for one point (`lat`, `lng`) over the next 48 hours, as epoch seconds. Separate from the batch endpoint because that one is called with up to a hundred plume points at once and has no use for a time series. Same no-fallback rule: a failed fetch returns an empty series. |
 | `/api/wind/batch` | POST | Current wind for a list of `{lat, lng}` points. |
 | `/api/wind/forecast/batch` | POST | Hourly wind, humidity, precipitation and temperature over `hours` hours. |
 | `/api/elevation/batch` | POST | Ground elevation for a list of points. |
