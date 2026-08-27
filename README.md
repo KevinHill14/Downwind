@@ -65,14 +65,16 @@ The window is adjustable from 1 to 7 days. This is explicitly a demo-grade appro
 
 Fire proximity is half of the danger. Smoke is the other half, and it travels hundreds of kilometres.
 
-Click **Where's the smoke going?**, then click anywhere on the globe and pick a radius. The app finds every fire inside that circle, groups them into up to 24 smoke sources, reads the **measured** PM2.5 at the strongest ones, and projects where that smoke travels over the next 48 hours on forecast wind.
+Click **Where's the smoke going?**, then click anywhere on the globe and pick a radius. The app finds every fire inside that circle, groups them into up to 24 smoke sources, reads the **reported PM2.5 for the area around** the strongest ones, and projects where that smoke travels over the next 48 hours on forecast wind.
+
+That wording is deliberate. The provider is a global atmospheric model on a roughly 40 km grid rather than a sensor at the fire, so it reports the air over the surrounding area and not the plume itself. Sampling north from a 192 MW Ontario fire returned an identical 11.3 µg/m³ at 0, 6, 11 and 22 km, and only moved at 44 km, which is the grid cell showing through. It is a real figure for a real area, and calling it a measurement at the fire would claim a precision it does not have. It also explains why the smoke projection exists at all: near a single fire the grid averages the plume away, and the model is what fills that gap.
 
 The plume's colour *and* opacity are set per-vertex from the US AQI at that distance, so it reads as dark and solid where the air is genuinely hazardous and fades to nothing where it has diluted back to background. A flat translucent shape would have shown where smoke goes while saying nothing about how bad it is on arrival.
 
 The readout gives the **provider's published AQI** at the fire, the direction and reach of the plume, **estimated PM2.5** at distances spanning the whole plume, the point at which it thins back to ordinary air, and which countries it crosses. Three deliberate choices here:
 
 - The source AQI is the provider's own published figure rather than one derived locally. US AQI is defined on an averaging window, so pushing an instantaneous PM2.5 through its breakpoints produces a different number from the official one. At a Ukrainian fire that difference was 55 against a published 69.
-- Downwind figures are quoted in µg/m³ rather than as an AQI, which keeps a modelled number off the same scale as the measured one directly above it.
+- Downwind figures are quoted in µg/m³ rather than as an AQI, which keeps a number this app modelled off the same scale as the provider's own figure directly above it.
 - Sample distances span the full plume rather than a fixed 50/150/300 km set, snapped to round numbers with the far tip always included. The fixed set stopped reporting at 300 km while the plume was still drawn out past 800 km, so the far half of what you could see on the globe carried no number at all. Scaling this costs nothing, since the concentration model is arithmetic and the geometry was already full length.
 - A distance is only quoted while the model is still meaningfully above clean air. A weak source sits at background from the first step, and printing "50 km: ~5 (good); 150 km: ~5 (good); 300 km: ~5 (good)" dresses three identical numbers up as a measurement. That case now says the smoke blends into normal air almost immediately, and everything stronger also gets the distance at which it clears.
 
@@ -419,7 +421,7 @@ Two layers, two different fixes:
 
 - Prediction is a **demo-grade approximation**, useful for visualising plausible direction and reach, unsuitable for operational or safety decisions.
 - Ground-confirmed fire data covers **Canada only**. Most countries do not publish an equivalent open incident feed.
-- Smoke concentrations downwind are modelled from a **single measured reading** at the fire plus forecast wind, which is a Gaussian-ish dilution approximation rather than an atmospheric dispersion model. It guides you to where smoke goes and does not replace a local air quality monitor.
+- Smoke concentrations downwind are modelled from a **single reported reading** for the area around the fire plus forecast wind, which is a Gaussian-ish dilution approximation rather than an atmospheric dispersion model. It guides you to where smoke goes and does not replace a local air quality monitor.
 - The replay is capped at 7 days and one region at a time. NASA's endpoint allows at most 5 days per request and its response time scales badly with area, so a whole-world week is impractical on free hosting.
 - Ocean name labels reuse the country label system and are not fully built out.
 - A detection-age filter and shareable URLs encoding the current view are both designed and unbuilt.

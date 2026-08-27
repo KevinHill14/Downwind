@@ -4035,7 +4035,13 @@ async function runSmokeAnalysis(centre) {
     lines.push(
       `<p><span id="smokeAqiBadge" style="background: rgb(${cat.color.join(',')})">` +
       `AQI ${formatAqi(sourceAqi)} · ${cat.name}</span></p>`,
-      `<p>Measured at the fire: <strong>${strongest.sourcePm25.toFixed(0)} µg/m³</strong> PM2.5</p>`
+      // Deliberately NOT "measured at the fire". The provider is a global
+      // atmospheric model on a roughly 40 km grid, not a sensor standing next
+      // to the flames: sampling north from a 192 MW Ontario fire returned an
+      // identical 11.3 ug/m3 at 0, 6, 11 and 22 km, and only moved at 44. So
+      // this is the air over the surrounding area, which is a real figure and
+      // a different claim, and calling it a measurement would overstate it.
+      `<p>Air at the fire's location: <strong>${strongest.sourcePm25.toFixed(0)} µg/m³</strong> PM2.5</p>`
     );
 
     const end = strongest.centreline[strongest.centreline.length - 1];
