@@ -102,9 +102,19 @@ I would rather ship that finding than quietly adjust a number until the graph lo
 
 ### What's next
 
-- Crowd-sourced fire reporting with accounts. Scoped, then deliberately deferred, because reports from the public need moderation and proper access control before anyone should trust them.
-- Validation against mapped fire perimeters, which is the only way to settle whether the spread model is any good.
-- Wider ground-confirmed coverage. Canada publishes an excellent open feed of agency-reported fires. Most countries do not, and that gap is the single biggest limit on how far this can go.
+**Make the ground-confirmed data work outside Canada.** This is the biggest single limit on the project. Canada publishes every agency-reported fire as an open feed with timestamps, which is why the Canadian replay is trustworthy and the rest of the world's is satellite-only, blind spot included. The United States publishes comparable data through the National Interagency Fire Center, and Europe through EFFIS, so the next step is one adapter per source that normalises them into the same shape the Canadian feed already fills. Australia is harder, because fire reporting there is state by state rather than national. Every country added removes the smoke blind spot from that country's map.
+
+**Replace the spread heuristic with a real fire behaviour model.** What ships today is a demo-grade approximation: wind speed and direction, biased by slope and damped by humidity and rain. It has no concept of what is actually burning. The established science here is the Rothermel surface spread equations and the tools built on them, and they need something this project does not have yet, which is fuel data: what vegetation is on the ground, how dense it is, and how dry it is right now. The United States publishes fuel maps through LANDFIRE. Globally that data is patchy, so the honest version of this feature is probably excellent in a few countries and unavailable elsewhere, and it should say which one you are looking at.
+
+**Validate against mapped fire perimeters.** The perimeters that agencies and aircraft map directly are not affected by the smoke blind spot that ruins satellite detections as a scoring target. Until the model is graded against those, nobody can say whether it is any good, including me.
+
+**Forecast the air, rather than only reporting it.** Air quality today is the current reading at your address. The same provider publishes an hourly forecast, so the address check could answer "the air is fine now, and it will not be by this evening", which is far more useful than a snapshot for anyone deciding whether to go out.
+
+**Alerts.** Save an address, and get told when smoke is projected to reach it. Everything needed for this already exists in the app, and it turns a thing you remember to check into a thing that tells you.
+
+**Crowd-sourced fire reporting with accounts.** Scoped, then deliberately deferred. Reports from the public need moderation and proper access control before anyone should trust them, and doing that badly is worse than not doing it.
+
+**Smaller things worth doing.** Shareable links that encode the current view, so a plume can be sent to someone rather than described. A longer history archive than 7 days, which NASA's endpoint makes awkward but not impossible. A filter for detection age, so you can separate what is burning now from what burned yesterday.
 
 ---
 
