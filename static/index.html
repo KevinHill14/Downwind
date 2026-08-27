@@ -663,8 +663,8 @@
   <p id="firePanelNote"></p>
 </div>
 <div id="disclaimerBar">
-  Fire data from satellite (NASA FIRMS) and ground (Natural Resources Canada CWFIS) sources - detections can be delayed, missed, or misattributed, and predicted spread is a rough estimate, not a guarantee. Do not rely on this tool for evacuation or safety decisions - always follow official emergency alerts.
-  <span id="disclaimerCredits">Data: NASA FIRMS &middot; Natural Resources Canada CWFIS &middot; Open-Meteo &middot; OpenStreetMap/Nominatim &middot; globe.gl / three.js</span>
+  Fire data from satellite (NASA FIRMS) and ground (Natural Resources Canada CWFIS, US NIFC WFIGS) sources - detections can be delayed, missed, or misattributed, and predicted spread is a rough estimate, not a guarantee. Do not rely on this tool for evacuation or safety decisions - always follow official emergency alerts.
+  <span id="disclaimerCredits">Data: NASA FIRMS &middot; Natural Resources Canada CWFIS &middot; NIFC WFIGS &middot; Open-Meteo &middot; OpenStreetMap/Nominatim &middot; globe.gl / three.js</span>
 </div>
 <div id="globeViz"></div>
 
@@ -1250,10 +1250,12 @@ function currentMinConfidence() {
   return smallFiresToggle.checked ? null : 'h';
 }
 
-// Ground-sourced fires (Canada, see main.py) are always shown in full.
+// Ground-sourced fires (Canada and the US, see main.py) are always shown in
+// full.
 //
 // This used to be a "Show minor ground fires" switch that could restrict
-// them to >=40 hectares. It was removed: the filter is Canada-only, its
+// them to >=40 hectares. It was removed: the filter only ever touched
+// ground-sourced fires, its
 // label meant nothing without knowing that, and its "on" state - show
 // everything - was both the default and the right answer. It also predated
 // the performance work, when trimming markers still mattered; it doesn't
@@ -4218,7 +4220,7 @@ function openFirePanel(marker) {
   add('Heat output', `${marker.totalFrp.toFixed(1)} MW`);
   if (marker.count > 1) add('Hottest detection', `${marker.maxFrp.toFixed(1)} MW`);
 
-  // Ground-sourced (CWFIS) fires carry real hectares; satellite ones don't.
+  // Ground-sourced (CWFIS, WFIGS) fires carry real hectares; satellite ones don't.
   const hectares = marker.fires?.find(f => f.ha !== null && f.ha !== undefined)?.ha;
   if (hectares !== undefined) add('Area burned', `${Math.round(hectares).toLocaleString()} ha`);
 
@@ -4362,7 +4364,7 @@ function buildShareableImage(globeDataUrl) {
 
       ctx.fillStyle = '#777';
       ctx.font = `${Math.round(BAR * 0.155)}px system-ui, sans-serif`;
-      ctx.fillText('Data: NASA FIRMS - NRCan CWFIS - Open-Meteo', pad, img.height + BAR * 0.71);
+      ctx.fillText('Data: NASA FIRMS - NRCan CWFIS - NIFC WFIGS - Open-Meteo', pad, img.height + BAR * 0.71);
 
       out.toBlob(blob => resolve(blob), 'image/png');
     };

@@ -12,7 +12,7 @@ A 3D rotating globe of every wildfire burning on Earth right now, which also pro
 
 Most wildfire maps answer "what is burning". The name of this one comes from the question it answers that they do not: the overwhelming majority of people a wildfire harms never see flame, they breathe smoke that has travelled hundreds of kilometres downwind, and distance-based tools tell them they are safe.
 
-Fire data comes live from satellites (NASA FIRMS) and, for Canada, ground-confirmed agency reports (CWFIS). The globe is a single-page Three.js / `globe.gl` frontend. The backend is a FastAPI server that aggregates fire data and proxies weather, terrain and geocoding lookups.
+Fire data comes live from satellites (NASA FIRMS) and, for Canada and the United States, ground-confirmed agency reports (CWFIS and NIFC's WFIGS). The globe is a single-page Three.js / `globe.gl` frontend. The backend is a FastAPI server that aggregates fire data and proxies weather, terrain and geocoding lookups.
 
 ---
 
@@ -34,11 +34,11 @@ Fire data comes live from satellites (NASA FIRMS) and, for Canada, ground-confir
 
 ### Live fire map
 
-Every active fire detection worldwide, refreshed every 10 minutes from 3 NASA VIIRS satellites (SNPP, NOAA-20, NOAA-21) plus Canada's ground-confirmed active fire list.
+Every active fire detection worldwide, refreshed every 10 minutes from 3 NASA VIIRS satellites (SNPP, NOAA-20, NOAA-21) plus the Canadian and US ground-confirmed active fire lists.
 
 Severity tiers run on Fire Radiative Power, a proxy for intensity: yellow, orange, red, then **extreme** (>=150 MW) and **catastrophic** (>=450 MW), log-scaled so the colour range stays meaningful across both a small brush fire and a megafire. Where markers overlap, the fiercest one is drawn on top, so a 4 MW smoulder can never sit over a 400 MW fire.
 
-Canadian ground-confirmed fires are de-duplicated against satellite hits for the same physical fire, so a large complex shows as one ground marker rather than that marker plus a dense cloud of satellite pixels across its own footprint.
+Ground-confirmed fires are de-duplicated against satellite hits for the same physical fire, so a large complex shows as one ground marker rather than that marker plus a dense cloud of satellite pixels across its own footprint.
 
 ### Fire spread prediction
 
@@ -141,7 +141,7 @@ If the server is still doing its own first fetch from NASA, `/api/fires` says so
                          +---------------------------------+---------------------------------+
                          v                                 v                                 v
            +--------------------------+      +--------------------------+      +--------------------------+
-           |    NASA FIRMS (VIIRS)    |      |      CWFIS (Canada)      |      |  Open-Meteo / Nominatim  |
+           |    NASA FIRMS (VIIRS)    |      |  CWFIS (CA) / WFIGS (US) |      |  Open-Meteo / Nominatim  |
            |  satellite detections    |      |  ground-confirmed fires  |      |  wind, elevation, air    |
            |  free API key needed     |      |  no key needed           |      |  quality, geocoding      |
            +--------------------------+      +--------------------------+      +--------------------------+
@@ -257,7 +257,7 @@ All endpoints return JSON. None require auth from the browser, since the backend
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/fires` | GET | Fire data. `bbox`, `grid`, `min_frp`, `min_confidence`, `min_hectares` filter and cluster it. `count_only=1` returns just the counts. Returns `ready: false` if the server has not finished its first NASA fetch. |
-| `/api/fires/history` | GET | The last `days` (2-7) of detections in a region, split by day. `bbox` is required, since a whole-world week is far too much data. Oversized boxes are clipped around their centre and the response says so. Over Canada it merges CWFIS ground history (`has_ground_data`, per-day `ground_count`). |
+| `/api/fires/history` | GET | The last `days` (2-7) of detections in a region, split by day. `bbox` is required, since a whole-world week is far too much data. Oversized boxes are clipped around their centre and the response says so. Over Canada and the US it merges ground history from CWFIS and WFIGS (`has_ground_data`, per-day `ground_count`). |
 | `/api/air-quality/batch` | POST | Ground-level PM2.5 and US AQI for a list of points. Returns nulls rather than estimates where no measurement exists. |
 | `/api/wind/batch` | POST | Current wind for a list of `{lat, lng}` points. |
 | `/api/wind/forecast/batch` | POST | Hourly wind, humidity, precipitation and temperature over `hours` hours. |
@@ -332,6 +332,24 @@ The numbers above are larger than the ones this section first carried, because t
 | ON 82 of 178 | NT 161 of 185 | PC 21 of 25 | YT 14 of 22 | NS 1 of 2 | NB 0 of 2 |
 
 Manitoba was the tell. The live map showed 112 fires there and the replay showed 3, which is what surfaced the bug. The replay now unions both products, deduplicated by `national_fire_id`, which recovers around 530 fires a day nationally. Neither product is sufficient alone: the versioned layer goes stale mid-fire, and the current list cannot describe a fire that has already gone out.
+
+### The US feed has no validity window, so one had to be built
+
+NIFC publishes the American equivalent through WFIGS, and it reaches the map through the same path: same confidence tier, same hectares-based severity proxy, same dedupe against the satellite pixels sitting on top of it. The live half is a single request against a layer NIFC maintains as "still going".
+
+The replay half needed work, because WFIGS records carry no `record_start` / `record_end` the way CWFIS's do. `FireDiscoveryDateTime` gives an unambiguous start. The end is the awkward half, and the obvious reading of it is wrong: `ContainmentDateTime` is null on the overwhelming majority of records, including thousands of small January incidents that are long finished, so treating null as "still burning" put **11,942 fires in a 7-day window**, nearly all of them phantoms.
+
+`ModifiedOnDateTime_dt` settles it, as a filter rather than as the end itself. A record an agency is still updating is a fire an agency is still working. Measured on 2026-08-27:
+
+| Records touched within | 2 days | 7 days | 14 days |
+|---|---|---|---|
+| Wildfire incidents | 765 | 2,923 | 5,225 |
+
+Every one of the large Oregon and Washington fires had been updated within the hour. Requiring an update inside the requested window is what drops the phantoms, and it needs no arbitrary age cutoff, since a fire nobody has touched all week stops appearing on its own. An uncontained fire then runs to the end of today, matching the convention CWFIS uses when it stamps an active fire's `record_end` as 31 December.
+
+Using the last-update time as the window's end instead looks right and is not. Days are sampled at noon UTC, so a fire updated at 01:00 this morning had a window that closed before today's sample and vanished from the very day it was most certainly burning on. That showed up as **today reading 0 fires** while every previous day read a few hundred.
+
+Result, measured 2026-08-27: 180 ground-confirmed fires now on the live map across the Pacific Northwest where there were previously none, 44 in California, and a 7-day US replay rising from 288 fires to 480 across the week.
 
 ### Predictions, which took the most iteration by far
 
@@ -411,7 +429,8 @@ Two layers, two different fixes:
 ## Known limitations and ideas not built
 
 - Prediction is a **demo-grade approximation**, useful for visualising plausible direction and reach, unsuitable for operational or safety decisions.
-- Ground-confirmed fire data covers **Canada only**. Most countries do not publish an equivalent open incident feed.
+- Ground-confirmed fire data covers **Canada and the United States only**. Most countries do not publish an equivalent open incident feed. Europe's EFFIS is the obvious next one; Australia reports state by state rather than nationally, which makes it several adapters rather than one.
+- The US feed carries every reported wildland fire including sub-acre local dispatch calls, so anything under an acre is left to the satellites rather than drawn as a ground-confirmed marker. Canada's national feed does not carry those, so it needs no equivalent floor.
 - Smoke concentrations downwind are modelled from a **single measured reading** at the fire plus forecast wind, which is a Gaussian-ish dilution approximation rather than an atmospheric dispersion model. It guides you to where smoke goes and does not replace a local air quality monitor.
 - The replay is capped at 7 days and one region at a time. NASA's endpoint allows at most 5 days per request and its response time scales badly with area, so a whole-world week is impractical on free hosting.
 - Ocean name labels reuse the country label system and are not fully built out.
