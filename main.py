@@ -10,9 +10,8 @@ Serves:
 - GET /api/geocode               -> place name/address -> lat/lng, for the address risk-check feature
 
 Fire data merges two sources into one in-memory dataset (see _world_fires):
-NASA FIRMS (VIIRS satellite, worldwide) plus ground-confirmed agency reports
-where a country publishes them: CWFIS for Canada (see _fetch_canada_fires) and
-NIFC's WFIGS for the United States (see _fetch_us_fires).
+NASA FIRMS (VIIRS satellite, worldwide) and, Canada-only for now, CWFIS's
+national ground-confirmed active fire list (see _fetch_canada_fires).
 
 NASA FIRMS requires a free MAP_KEY: https://firms.modaps.eosdis.nasa.gov/api/
 Set it as the FIRMS_MAP_KEY environment variable before running.
@@ -200,122 +199,6 @@ async def _fetch_canada_fires() -> list[dict]:
     return fires
 
 
-# The United States' equivalent of CWFIS: NIFC publishes every agency-reported
-# wildfire through WFIGS as an open ArcGIS feature service, no key required.
-# Same purpose as the Canadian feed - a fire that hides its own hottest core
-# under its own smoke is invisible to a satellite and perfectly well known to
-# the crews standing next to it.
-NIFC_BASE = "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services"
-# "Current" is NIFC's maintained set of incidents that are still going, so it
-# needs no "is this still burning" filter of its own (measured 2026-08-27:
-# 668 records, all uncontained).
-NIFC_CURRENT_URL = f"{NIFC_BASE}/WFIGS_Incident_Locations_Current/FeatureServer/0/query"
-NIFC_YTD_URL = f"{NIFC_BASE}/WFIGS_Incident_Locations_YearToDate/FeatureServer/0/query"
-# WF is a wildfire; RX is a planned prescribed burn, which is a fire somebody
-# lit on purpose and is standing over. Showing those as wildfires would be
-# wrong in the one direction this app must never be wrong in.
-NIFC_WILDFIRE_ONLY = "IncidentTypeCategory = 'WF'"
-# WFIGS reports area in acres; everything in this app is hectares.
-ACRES_TO_HECTARES = 0.404686
-# WFIGS covers every reported wildland fire including sub-acre local dispatch
-# calls, which Canada's national feed does not carry. Thousands of those drawn
-# as ground-confirmed markers would bury the fires this layer exists to
-# surface, so anything under an acre (or with no reported size at all) is left
-# to the satellites.
-NIFC_MIN_ACRES = 1.0
-# Rough bounds of the US including Alaska, Hawaii and Puerto Rico.
-US_BOUNDS = (-179.9, 17.5, -64.5, 71.5)  # west, south, east, north
-
-
-def _parse_nifc_time(value) -> datetime | None:
-    """WFIGS timestamps are epoch MILLISECONDS, and are frequently null."""
-    if value is None:
-        return None
-    try:
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-    except (TypeError, ValueError, OSError):
-        return None
-
-
-async def _fetch_nifc_features(url: str, where: str, fields: str, max_pages: int = 6) -> list[dict]:
-    """Every matching WFIGS feature, following the service's paging.
-
-    ArcGIS caps a single response at its own record limit and says so with
-    `exceededTransferLimit` rather than failing, so a week of US incidents
-    (2,900+) silently arrives as the first 2,000 unless the offset is
-    followed. `max_pages` bounds that loop so a filter that accidentally
-    matches the whole year cannot walk the entire archive."""
-    features: list[dict] = []
-    offset = 0
-    for _ in range(max_pages):
-        params = {
-            "where": where, "outFields": fields, "returnGeometry": "true",
-            "outSR": "4326", "f": "json", "resultOffset": offset,
-            "resultRecordCount": 2000,
-        }
-        resp = await _http_client.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if "error" in data:
-            raise httpx.HTTPError(f"WFIGS query rejected: {data['error']}")
-        page = data.get("features") or []
-        features.extend(page)
-        if not data.get("exceededTransferLimit") or not page:
-            break
-        offset += len(page)
-    return features
-
-
-def _nifc_rows(features: list[dict]):
-    """The (attributes, lat, lng, acres) of every feature worth keeping.
-
-    Shared by the live and history paths so a row that is too small, has no
-    location, or has no reported size is dropped by one rule rather than two
-    that can drift apart."""
-    for feature in features:
-        attrs = feature.get("attributes") or {}
-        geom = feature.get("geometry") or {}
-        lat, lng, acres = geom.get("y"), geom.get("x"), attrs.get("IncidentSize")
-        if lat is None or lng is None or acres is None or acres < NIFC_MIN_ACRES:
-            continue
-        yield attrs, float(lat), float(lng), float(acres)
-
-
-NIFC_CURRENT_FIELDS = "IrwinID,IncidentSize,FireDiscoveryDateTime,ModifiedOnDateTime_dt"
-
-
-async def _fetch_us_fires() -> list[dict]:
-    """Every ground-confirmed US wildfire currently burning, in one request.
-
-    The American half of the same idea as _fetch_canada_fires, and it reaches
-    the map through exactly the same path: same confidence tier, same
-    hectares-based severity proxy, same dedupe against satellite pixels
-    sitting on top of it."""
-    features = await _fetch_nifc_features(NIFC_CURRENT_URL, NIFC_WILDFIRE_ONLY, NIFC_CURRENT_FIELDS)
-
-    fires = []
-    for attrs, lat, lng, acres in _nifc_rows(features):
-        # Last touched, falling back to when it was found - this is what the
-        # marker reports as its detection time, and an incident's record is
-        # updated as the incident develops.
-        dt = _parse_nifc_time(attrs.get("ModifiedOnDateTime_dt")) or _parse_nifc_time(
-            attrs.get("FireDiscoveryDateTime")
-        ) or datetime.now(timezone.utc)
-        hectares = acres * ACRES_TO_HECTARES
-        fires.append(
-            Fire(
-                lat=lat,
-                lng=lng,
-                confidence="h",  # agency-reported, same tier as the Canadian feed
-                frp=max(30.0, math.log1p(hectares) * 15),
-                acq_date=dt.strftime("%Y-%m-%d"),
-                acq_time=dt.strftime("%H%M"),
-                ha=hectares,
-            )
-        )
-    return fires
-
-
 WORLD_AREA = "-180,-90,180,90"
 WORLD_REFRESH_INTERVAL_SECONDS = 10 * 60  # matches FIRMS' own NRT refresh cadence
 
@@ -388,18 +271,12 @@ async def _refresh_world_fires() -> None:
     results = await asyncio.gather(*(_fetch_firms_fires(WORLD_AREA, source) for source in FIRMS_SOURCES))
     satellite_fires = [f for source_fires in results for f in source_fires]
 
-    # Canada and the US, gathered together and independently: one country's
-    # agency being down is not a reason to lose the other's, and neither is a
-    # reason to lose the satellites. A supplement, not the backbone.
-    ground_results = await asyncio.gather(
-        _fetch_canada_fires(), _fetch_us_fires(), return_exceptions=True
-    )
-    ground_fires: list[dict] = []
-    for part, label in zip(ground_results, ("CWFIS", "NIFC")):
-        if isinstance(part, Exception):
-            print(f"[refresh] {label} ground fetch failed: {type(part).__name__}: {part}")
-        else:
-            ground_fires.extend(part)
+    try:
+        ground_fires = await _fetch_canada_fires()
+    except Exception:
+        # A supplement, not the backbone - satellite data still goes out
+        # if this is down or changes shape.
+        ground_fires = []
 
     satellite_fires = _dedupe_against_ground(satellite_fires, ground_fires)
     # The new dataset is fully built before it replaces the old one, so both
@@ -871,70 +748,7 @@ async def _fetch_canada_current_records() -> list[dict]:
     return records
 
 
-def _bbox_intersects_us(west: float, south: float, east: float, north: float) -> bool:
-    uw, us_, ue, un = US_BOUNDS
-    return not (east < uw or west > ue or north < us_ or south > un)
-
-
-NIFC_HISTORY_FIELDS = (
-    "IrwinID,IncidentSize,FireDiscoveryDateTime,ContainmentDateTime,ModifiedOnDateTime_dt"
-)
-
-
-async def _fetch_us_history(start_date, end_date) -> list[dict]:
-    """US ground-confirmed wildfires whose burning window touches the requested
-    range, shaped like the CWFIS records so they share one code path.
-
-    The validity window has to be assembled here, because WFIGS does not
-    publish one the way CWFIS does. A fire starts at `FireDiscoveryDateTime`,
-    which is unambiguous. The end is the awkward half: `ContainmentDateTime`
-    is the right answer when it exists, but it is null on the overwhelming
-    majority of records, including thousands of small January incidents that
-    are long over. Treating null as "still burning" put 11,942 fires in a
-    7-day window, nearly all of them phantoms.
-
-    `ModifiedOnDateTime_dt` settles it, as a filter rather than as the end
-    itself. A record an agency is still updating is a fire an agency is still
-    working: measured 2026-08-27, 765 records touched within 2 days against
-    5,225 within 14, and every one of the large Oregon and Washington fires
-    had been updated within the hour. Requiring an update inside the requested
-    window is what drops the phantoms, and it needs no arbitrary age cutoff,
-    since a fire nobody has touched all week stops appearing on its own.
-
-    An uncontained fire then runs to the end of today, which is the same
-    convention CWFIS uses when it stamps an active fire's record_end as 31
-    December. Using the last-update time as the end instead looks right and is
-    not: days are sampled at noon UTC, so a fire updated at 01:00 this morning
-    would have a window that closed before today's sample and would vanish
-    from the very day it is most certainly burning on."""
-    where = (
-        f"{NIFC_WILDFIRE_ONLY} "
-        f"AND FireDiscoveryDateTime <= TIMESTAMP '{end_date} 23:59:59' "
-        f"AND ModifiedOnDateTime_dt >= TIMESTAMP '{start_date} 00:00:00'"
-    )
-    features = await _fetch_nifc_features(NIFC_YTD_URL, where, NIFC_HISTORY_FIELDS)
-    still_burning = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0)
-
-    records = []
-    for attrs, lat, lng, acres in _nifc_rows(features):
-        start = _parse_nifc_time(attrs.get("FireDiscoveryDateTime"))
-        end = _parse_nifc_time(attrs.get("ContainmentDateTime")) or still_burning
-        if start is None or end is None or end < start:
-            continue
-        records.append(
-            {
-                "id": attrs.get("IrwinID") or f"nifc:{lat:.5f},{lng:.5f}",
-                "lat": lat,
-                "lng": lng,
-                "ha": acres * ACRES_TO_HECTARES,
-                "start": start,
-                "end": end,
-            }
-        )
-    return records
-
-
-def _ground_fires_on_day(records: list[dict], day) -> list[Fire]:
+def _canada_fires_on_day(records: list[dict], day) -> list[Fire]:
     """The ground-confirmed fires burning on `day`, as Fire objects.
 
     Sampled at noon UTC rather than over the whole day: records are short
@@ -947,8 +761,7 @@ def _ground_fires_on_day(records: list[dict], day) -> list[Fire]:
     # The two CWFIS products overlap, so a fire present in both would otherwise
     # be drawn twice and counted twice. Callers pass the versioned records
     # first and those win, since they carry that day's actual reported stage
-    # and size rather than today's. US records carry their own IrwinID and
-    # come from a single product, so they pass through this untouched.
+    # and size rather than today's.
     seen_ids: set[str] = set()
     for r in records:
         if r["start"] <= noon <= r["end"]:
@@ -1184,34 +997,27 @@ async def get_fires_history(
             (datetime.now(timezone.utc) - timedelta(days=n)).date()
             for n in range(days - 1, -1, -1)
         ]
-        # Each country's feed is only asked for when the view actually touches
-        # that country, so looking at Australia pays for neither.
-        wants_canada = _bbox_intersects_canada(west, south, east, north)
-        wants_us = _bbox_intersects_us(west, south, east, north)
+        wants_ground = _bbox_intersects_canada(west, south, east, north)
 
-        async def ground_history():
-            sources = []
-            if wants_canada:
-                # Both CWFIS products. Neither is complete on its own: the
-                # versioned layer goes stale mid-fire for several agencies,
-                # and the current list cannot describe a fire that has already
-                # gone out. See _fetch_canada_current_records for the measured
-                # split. Versioned first, because _ground_fires_on_day lets the
-                # first record for a fire win and that one knows the stage on
-                # the day.
-                sources.append(("CWFIS reportedfires", _fetch_canada_history(window[0], window[-1])))
-                sources.append(("CWFIS activefires", _fetch_canada_current_records()))
-            if wants_us:
-                sources.append(("NIFC WFIGS", _fetch_us_history(window[0], window[-1])))
-            if not sources:
+        async def canada_history():
+            if not wants_ground:
                 return []
-            parts = await asyncio.gather(*(coro for _, coro in sources), return_exceptions=True)
+            # Both CWFIS products. Neither is complete on its own: the
+            # versioned layer goes stale mid-fire for several agencies, and
+            # the current list cannot describe a fire that has already gone
+            # out. See _fetch_canada_current_records for the measured split.
+            # Versioned first, because _canada_fires_on_day lets the first
+            # record for a fire win and that one knows the stage on the day.
+            versioned, current = await asyncio.gather(
+                _fetch_canada_history(window[0], window[-1]),
+                _fetch_canada_current_records(),
+                return_exceptions=True,
+            )
             records: list[dict] = []
-            for (label, _), part in zip(sources, parts):
+            for part, label in ((versioned, "reportedfires"), (current, "activefires")):
                 if isinstance(part, Exception):
-                    # One source failing still leaves usable ground data from
-                    # the others, including the other country's.
-                    print(f"[history] {label} failed: {type(part).__name__}: {part}")
+                    # One source failing still leaves usable ground data.
+                    print(f"[history] CWFIS {label} failed: {type(part).__name__}: {part}")
                 else:
                     records.extend(part)
             return records
@@ -1222,7 +1028,7 @@ async def get_fires_history(
                 for source in FIRMS_SOURCES
                 for start, span in _history_chunks(days)
             ),
-            ground_history(),
+            canada_history(),
             return_exceptions=True,
         )
         *satellite_results, ground_result = results
@@ -1240,12 +1046,12 @@ async def get_fires_history(
         ground_by_day: dict[str, list[Fire]] = {}
         if isinstance(ground_result, Exception):
             # A supplement, not the backbone - the satellite animation still
-            # goes out if the ground feeds are down or change shape.
-            print(f"[history] ground request failed: {type(ground_result).__name__}: {ground_result}")
+            # goes out if CWFIS is down or changes shape.
+            print(f"[history] CWFIS request failed: {type(ground_result).__name__}: {ground_result}")
         elif ground_result:
             for day in window:
                 in_box = [
-                    f for f in _ground_fires_on_day(ground_result, day)
+                    f for f in _canada_fires_on_day(ground_result, day)
                     if west <= f.lng <= east and south <= f.lat <= north
                 ]
                 if in_box:
