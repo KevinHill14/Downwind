@@ -1261,6 +1261,7 @@ async def _cache_eviction_loop() -> None:
         _evict_expired(_elevation_cache, ELEVATION_CACHE_TTL_SECONDS, now)
         _evict_expired(_current_wind_cache, FORECAST_CACHE_TTL_SECONDS, now)
         _evict_expired(_air_quality_cache, AIR_QUALITY_CACHE_TTL_SECONDS, now)
+        _evict_expired(_air_quality_forecast_cache, AIR_QUALITY_CACHE_TTL_SECONDS, now)
 
 
 def _round_coord(v: float) -> float:
@@ -1558,6 +1559,75 @@ async def get_air_quality_batch(points: list[WindPoint] = Body(..., max_length=M
             }
         )
     return {"results": results}
+
+
+# How far ahead the address check looks. Two days is the range where the
+# provider's hourly air-quality model is still worth reporting, and it's
+# long enough to answer "is tonight going to be bad" without turning the
+# line into a weather report.
+AIR_QUALITY_FORECAST_HOURS = 48
+_air_quality_forecast_cache: dict[str, dict] = {}  # "lat,lng" -> {"hours": [...], "fetched_at"}
+
+
+@app.get("/api/air-quality/forecast")
+async def get_air_quality_forecast(lat: float = Query(ge=-90, le=90), lng: float = Query(ge=-180, le=180)):
+    """Hourly PM2.5 and US AQI for one location over the next two days.
+
+    The batch endpoint above answers "what is the air like right now",
+    which is the wrong question for someone deciding whether to go out
+    later. Smoke arrives on a schedule: air that is clean at noon can be
+    unhealthy by evening once the plume reaches you. This is a separate
+    endpoint rather than an option on the batch one on purpose - the batch
+    path is called with up to a hundred plume points at once and has no use
+    for a time series, and making every one of those requests drag 48 hours
+    of data back would cost a lot to serve nothing.
+
+    Same honesty rule as the batch endpoint: no synthetic fallback. A
+    failure returns an empty series and the frontend simply says nothing."""
+    key = f"{_round_coord(lat)},{_round_coord(lng)}"
+    now = time.time()
+    cached = _air_quality_forecast_cache.get(key)
+    if cached is not None and (now - cached["fetched_at"]) < AIR_QUALITY_CACHE_TTL_SECONDS:
+        return {"lat": lat, "lng": lng, "hours": cached["hours"]}
+
+    params = {
+        "latitude": lat,
+        "longitude": lng,
+        "hourly": "pm2_5,us_aqi",
+        # Three days requested, two returned: the series starts at midnight
+        # of the current day in the provider's timezone, so asking for two
+        # would run out before 48 hours from now on any afternoon request.
+        "forecast_days": 3,
+        # Epoch seconds rather than the default local-ish string, so the
+        # frontend can render each hour in the viewer's own timezone
+        # without this server having to work out which timezone that is.
+        "timeformat": "unixtime",
+    }
+    try:
+        resp = await _get_with_retry(AIR_QUALITY_URL, params, timeout=15)
+        data = resp.json()
+    except httpx.HTTPError as e:
+        print(f"[air-quality/forecast] Open-Meteo request failed: {type(e).__name__}: {e}")
+        return {"lat": lat, "lng": lng, "hours": []}
+
+    hourly = (data or {}).get("hourly") or {}
+    times = hourly.get("time") or []
+    aqis = hourly.get("us_aqi") or []
+    pms = hourly.get("pm2_5") or []
+    cutoff = now + AIR_QUALITY_FORECAST_HOURS * 3600
+    hours = []
+    for i, t in enumerate(times):
+        # Past hours of the current day are dropped: this is a forecast, and
+        # "it was bad at 3am" is not what the panel is answering.
+        if t < now - 3600 or t > cutoff:
+            continue
+        aqi = aqis[i] if i < len(aqis) else None
+        if aqi is None:
+            continue
+        hours.append({"t": int(t), "us_aqi": aqi, "pm2_5": pms[i] if i < len(pms) else None})
+
+    _air_quality_forecast_cache[key] = {"hours": hours, "fetched_at": now}
+    return {"lat": lat, "lng": lng, "hours": hours}
 
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"

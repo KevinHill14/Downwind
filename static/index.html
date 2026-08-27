@@ -624,6 +624,9 @@
          and still be in genuinely bad air. Omitted entirely when the
          measurement isn't available rather than guessed at. -->
     <p id="addressAirLine"></p>
+    <!-- The next two days, because clean air now says nothing about
+         tonight: a plume that has not arrived yet still arrives. -->
+    <p id="addressAirForecastLine"></p>
     <!-- Only populated when Monte Carlo is on; hidden otherwise. -->
     <p id="addressProbabilityLine"></p>
   </div>
@@ -2996,6 +2999,7 @@ const addressRiskBadge = document.getElementById('addressRiskBadge');
 const addressLocationLine = document.getElementById('addressLocationLine');
 const addressProximityLine = document.getElementById('addressProximityLine');
 const addressAirLine = document.getElementById('addressAirLine');
+const addressAirForecastLine = document.getElementById('addressAirForecastLine');
 const addressAirBadge = document.getElementById('addressAirBadge');
 const addressProbabilityLine = document.getElementById('addressProbabilityLine');
 
@@ -3018,6 +3022,7 @@ function clearAddressCheck() {
   addressLocationLine.textContent = '';
   addressProximityLine.textContent = '';
   addressAirLine.textContent = '';
+  addressAirForecastLine.textContent = '';
   addressProbabilityLine.textContent = '';
 }
 addressInputClear.addEventListener('click', clearAddressCheck);
@@ -3061,6 +3066,57 @@ async function updateAddressAirQuality(lat, lng) {
   } catch (err) {
     // Same reasoning - silence beats a guess.
   }
+}
+
+// The reading above is a snapshot, and a snapshot is the wrong shape for the
+// decision people are actually making. Smoke arrives on a schedule: air that
+// is clean at noon can be unhealthy by evening once a plume reaches you, and
+// "fine now" reads as "fine" to anyone deciding whether to go out later.
+// One sentence, not a chart - the useful part is whether it's heading the
+// wrong way and roughly when.
+let addressAirForecastRunId = 0;
+async function updateAddressAirForecast(lat, lng) {
+  const runId = ++addressAirForecastRunId;
+  addressAirForecastLine.textContent = '';
+  try {
+    const res = await fetch(`/api/air-quality/forecast?lat=${lat}&lng=${lng}`);
+    const json = await res.json();
+    if (!res.ok || runId !== addressAirForecastRunId) return;
+    const hours = json.hours || [];
+    if (hours.length < 2) return;
+
+    const startIdx = aqiCategoryIndex(hours[0].us_aqi);
+    let peak = hours[0];
+    for (const h of hours) if (h.us_aqi > peak.us_aqi) peak = h;
+    const peakIdx = aqiCategoryIndex(peak.us_aqi);
+    // Only hours after the peak count as relief - air that was clean this
+    // morning says nothing about whether tonight's smoke clears.
+    const afterPeak = hours.slice(hours.indexOf(peak) + 1);
+    const relief = afterPeak.find(h => aqiCategoryIndex(h.us_aqi) < startIdx);
+
+    let text, cat;
+    if (peakIdx > startIdx) {
+      cat = aqiCategory(peak.us_aqi);
+      text = `Next 2 days: worsening to ${cat.name} (US AQI ${formatAqi(peak.us_aqi)}) around ${formatForecastHour(peak.t)}.`;
+    } else if (relief) {
+      cat = aqiCategory(relief.us_aqi);
+      text = `Next 2 days: improving to ${cat.name} by ${formatForecastHour(relief.t)}.`;
+    } else {
+      cat = aqiCategory(peak.us_aqi);
+      text = `Next 2 days: expected to stay ${cat.name}.`;
+    }
+    addressAirForecastLine.innerHTML =
+      `<span class="aqiDot" style="background: rgb(${cat.color.join(',')})"></span>${text}`;
+  } catch (err) {
+    // Same reasoning as the reading above - silence beats a guess.
+  }
+}
+
+// Epoch seconds -> "Wed 8 PM" in the viewer's own timezone. The hour is what
+// matters for this decision, so the minutes are dropped.
+function formatForecastHour(epochSeconds) {
+  return new Date(epochSeconds * 1000)
+    .toLocaleString([], { weekday: 'short', hour: 'numeric' });
 }
 
 const ADDRESS_CHECK_RADIUS_DEG = 3; // ~300-330km half-width bbox around the address
@@ -3138,6 +3194,7 @@ async function checkAddressRisk() {
     // people came for, and it shouldn't wait on (or be failed by) a second
     // provider. The air line fills itself in a moment later if it arrives.
     updateAddressAirQuality(lat, lng);
+    updateAddressAirForecast(lat, lng);
 
     // Ignores the "Show small fires" toggle - that's a display choice for
     // the main map, not something that should hide a real fire from a safety check.
@@ -3539,6 +3596,14 @@ const AQI_CATEGORIES = [
 ];
 function aqiCategory(aqi) {
   return AQI_CATEGORIES.find(c => aqi <= c.max) || AQI_CATEGORIES[AQI_CATEGORIES.length - 1];
+}
+
+// Position on the scale rather than the raw number, so the forecast line can
+// say "worsening" only when the category actually changes. AQI 41 to 49 is a
+// rise nobody needs to be told about; 41 to 55 crosses into Moderate.
+function aqiCategoryIndex(aqi) {
+  const i = AQI_CATEGORIES.findIndex(c => aqi <= c.max);
+  return i === -1 ? AQI_CATEGORIES.length - 1 : i;
 }
 
 // The US AQI scale is defined up to 500 and stops there. The provider will
