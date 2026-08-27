@@ -4377,7 +4377,7 @@ async function saveCurrentView() {
   try {
     const blob = await buildShareableImage(captureGlobePng());
     if (!blob) throw new Error('could not encode image');
-    const filename = `fire-tracker-${new Date().toISOString().slice(0, 10)}.png`;
+    const filename = `downwind-${new Date().toISOString().slice(0, 10)}.png`;
     const file = new File([blob], filename, { type: 'image/png' });
 
     // canShare({files}) is the real capability check - plain `navigator.share`

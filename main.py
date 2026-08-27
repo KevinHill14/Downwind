@@ -1634,7 +1634,7 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 # Nominatim requires an identifying User-Agent; fine here since it's only a
 # fallback, not the primary path.
-NOMINATIM_HEADERS = {"User-Agent": "hacksocial26-fire-tracker/1.0 (hackathon project)"}
+NOMINATIM_HEADERS = {"User-Agent": "downwind/1.0 (hackathon project)"}
 
 
 @app.get("/api/geocode")
