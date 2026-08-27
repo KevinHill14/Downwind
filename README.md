@@ -82,6 +82,8 @@ Type an address. The app geocodes it, looks at nearby fires including their pred
 
 Ground-level air quality is reported alongside the fire verdict and never folded into it, because they are different risks with different responses. Without this, somebody 200 km downwind of a megafire got a confident **SAFE** while breathing hazardous air.
 
+Both risks get their own badge: **FIRE: SAFE** beside **AIR: UNHEALTHY**. Reporting air quality only in the body text reintroduced the original problem in a smaller font, since a bare "SAFE" headline is what a reader takes away. The badges stay separate rather than merging into one score, because "stay indoors" and "be ready to leave" are different instructions.
+
 Unlike every wind endpoint, air quality has **no synthetic fallback**. A guessed wind direction misaims a drawing on a globe. A guessed air quality figure is a health number someone might act on. When the measurement is unavailable the line is omitted.
 
 With **Show uncertainty** on, the check also reports how often a fire reaches you across sampled wind scenarios, for example *"100% of 32 wind scenarios bring a fire within watch range, 6% within danger range"*. If a substantial share of scenarios land worse than the single best-guess wind, the rating is raised to match and says so. A one-in-three chance of danger should not display as a flat SAFE just because the most likely wind happens to miss.

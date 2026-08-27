@@ -279,6 +279,16 @@
   #addressRiskBadge.risk-safe { background: #2a5c2a; color: #a6e6a6; }
   #addressRiskBadge.risk-watch { background: #6b5a1e; color: #ffd97a; }
   #addressRiskBadge.risk-danger { background: #6b1e1e; color: #ff9a9a; }
+  /* Air gets its own badge beside the fire one. A single verdict would have to
+     merge two risks that call for different responses, and a bare "SAFE" next
+     to unhealthy air is the exact failure this whole project exists to fix.
+     Dark text because the AQI palette is bright, matching #smokeAqiBadge. */
+  #addressAirBadge {
+    display: none; padding: 4px 10px; border-radius: 999px; margin-left: 6px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.02em; margin-bottom: 6px;
+    color: #111;
+  }
+  #addressAirBadge.visible { display: inline-block; }
   .aqiDot {
     display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     margin-right: 6px; vertical-align: baseline;
@@ -607,7 +617,7 @@
   </div>
   <button id="addressCheckBtn" class="needsFireData">Check</button>
   <div id="addressResult">
-    <span id="addressRiskBadge"></span>
+    <span id="addressRiskBadge"></span><span id="addressAirBadge"></span>
     <p id="addressLocationLine"></p>
     <p id="addressProximityLine"></p>
     <!-- Smoke, not flame: someone can be far outside every fire radius above
@@ -2986,6 +2996,7 @@ const addressRiskBadge = document.getElementById('addressRiskBadge');
 const addressLocationLine = document.getElementById('addressLocationLine');
 const addressProximityLine = document.getElementById('addressProximityLine');
 const addressAirLine = document.getElementById('addressAirLine');
+const addressAirBadge = document.getElementById('addressAirBadge');
 const addressProbabilityLine = document.getElementById('addressProbabilityLine');
 
 addressInput.addEventListener('input', () => {
@@ -3002,6 +3013,8 @@ function clearAddressCheck() {
   addressResult.style.display = 'none';
   addressRiskBadge.className = '';
   addressRiskBadge.textContent = '';
+  addressAirBadge.className = '';
+  addressAirBadge.textContent = '';
   addressLocationLine.textContent = '';
   addressProximityLine.textContent = '';
   addressAirLine.textContent = '';
@@ -3019,6 +3032,8 @@ let addressAirRunId = 0;
 async function updateAddressAirQuality(lat, lng) {
   const runId = ++addressAirRunId;
   addressAirLine.textContent = '';
+  addressAirBadge.className = '';
+  addressAirBadge.textContent = '';
   try {
     const res = await fetch('/api/air-quality/batch', {
       method: 'POST',
@@ -3038,6 +3053,11 @@ async function updateAddressAirQuality(lat, lng) {
     addressAirLine.innerHTML =
       `<span class="aqiDot" style="background: rgb(${cat.color.join(',')})"></span>` +
       `Air quality: ${cat.name} (US AQI ${formatAqi(reading.us_aqi)}${pm})`;
+    // The headline too, not just the small print. Someone who reads the badge
+    // and nothing else should still learn that the air is bad.
+    addressAirBadge.textContent = `AIR: ${cat.name.toUpperCase()}`;
+    addressAirBadge.style.background = `rgb(${cat.color.join(',')})`;
+    addressAirBadge.classList.add('visible');
   } catch (err) {
     // Same reasoning - silence beats a guess.
   }
@@ -3246,7 +3266,10 @@ async function checkAddressRisk() {
     }
 
     const riskClass = displayLevel === 'danger' ? 'risk-danger' : displayLevel === 'watch' ? 'risk-watch' : 'risk-safe';
-    const riskLabel = displayLevel === 'danger' ? 'DANGER' : displayLevel === 'watch' ? 'WATCH' : 'SAFE';
+    // Named for what it judges. A bare "SAFE" reads as "you are fine", which is
+    // not what a fire-proximity verdict can promise while the air badge beside
+    // it may say Unhealthy.
+    const riskLabel = displayLevel === 'danger' ? 'FIRE: DANGER' : displayLevel === 'watch' ? 'FIRE: WATCH' : 'FIRE: SAFE';
 
     addressRiskBadge.className = riskClass;
     addressRiskBadge.textContent = riskLabel;
