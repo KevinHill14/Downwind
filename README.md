@@ -1,15 +1,12 @@
 # Downwind
 
-[![Live](https://img.shields.io/badge/Live-Downwind-E8590C?style=flat-square&labelColor=1C1D20&logo=googleearth&logoColor=E8590C)](https://fire-tracker-gdwa.onrender.com/)
-![Coverage](https://img.shields.io/badge/Coverage-worldwide%20%C2%B7%203%20VIIRS%20satellites-4C6B8A?style=flat-square&labelColor=1C1D20)
-![Live data](https://img.shields.io/badge/Live%20data-refreshed%20every%2010%20min-4C6B8A?style=flat-square&labelColor=1C1D20)
-![Forecasts](https://img.shields.io/badge/Forecasts-7%20day%20spread%20%C2%B7%2048%20h%20smoke-4C6B8A?style=flat-square&labelColor=1C1D20)
-![Replay](https://img.shields.io/badge/Replay-last%207%20days-4C6B8A?style=flat-square&labelColor=1C1D20)
-
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&labelColor=1C1D20&logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-async%20backend-009688?style=flat-square&labelColor=1C1D20&logo=fastapi&logoColor=white)
-![Frontend](https://img.shields.io/badge/Frontend-Three.js%20%2B%20globe.gl-1C1D20?style=flat-square&labelColor=1C1D20&logo=threedotjs&logoColor=white)
-![Render](https://img.shields.io/badge/Render-512%20MB%20free%20tier-46E3B7?style=flat-square&labelColor=1C1D20&logo=render&logoColor=white)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-E8590C?style=flat-square&logo=googleearth&logoColor=white)](https://fire-tracker-gdwa.onrender.com/)
+![Python](https://img.shields.io/badge/Python%203.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)
+![Three.js](https://img.shields.io/badge/Three.js%20%2B%20globe.gl-1C1D20?style=flat-square&logo=threedotjs&logoColor=white)
+![Render](https://img.shields.io/badge/Hosted%20on%20Render-46E3B7?style=flat-square&logo=render&logoColor=000000)
+![NASA FIRMS](https://img.shields.io/badge/NASA%20FIRMS-0B3D91?style=flat-square&logo=nasa&logoColor=white)
+![Open-Meteo](https://img.shields.io/badge/Open--Meteo-1D4ED8?style=flat-square)
 
 **Live: https://fire-tracker-gdwa.onrender.com/**
 
